@@ -1,9 +1,38 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Component } from "react";
 
-// ============================================================
-// TableFinder v2 - Real availability, real booking links
-// ============================================================
+// Error boundary to catch render crashes
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", flexDirection: "column", gap: 16, padding: 40 }}>
+          <h2>Something went wrong</h2>
+          <p style={{ color: "#8A7E70", maxWidth: 400, textAlign: "center" }}>{this.state.error?.message || "Unknown error"}</p>
+          <button onClick={() => window.location.reload()} style={{ padding: "10px 20px", background: "#E8A86D", color: "#1A1612", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function TableFinderWrapper() {
+  return <ErrorBoundary><TableFinder /></ErrorBoundary>;
+}
+
+// Safely convert any value to a displayable string
+function safe(val) {
+  if (val == null) return "";
+  if (typeof val === "string") return val;
+  if (typeof val === "number") return String(val);
+  if (typeof val === "object") {
+    return val.name || val.label || val.text || val.average || val.value || JSON.stringify(val);
+  }
+  return String(val);
+}
 
 function formatTime(dateTimeStr) {
   if (!dateTimeStr) return "";
@@ -54,7 +83,7 @@ function TimeSlotButton({ slot }) {
     >
       {time}
       {slot.type && slot.type !== "Dining Room" && (
-        <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>{slot.type}</span>
+        <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>{safe(slot.type)}</span>
       )}
     </a>
   );
@@ -75,13 +104,16 @@ function RestaurantCard({ restaurant }) {
             )}
           </h3>
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
-            {restaurant.cuisine && <span>{restaurant.cuisine}</span>}
-            {restaurant.price && <span>{restaurant.price}</span>}
-            {restaurant.rating && <span>{"★".repeat(Math.round(restaurant.rating))} {restaurant.rating}</span>}
+            {restaurant.cuisine && <span>{safe(restaurant.cuisine)}</span>}
+            {restaurant.price && <span>{safe(restaurant.price)}</span>}
+            {restaurant.rating != null && (() => {
+              const r = typeof restaurant.rating === "object" ? restaurant.rating.average || restaurant.rating.overall : Number(restaurant.rating);
+              return r > 0 ? <span>{"★".repeat(Math.min(5, Math.round(r)))} {r}</span> : null;
+            })()}
           </div>
           {restaurant.address && (
             <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>
-              {restaurant.address}
+              {safe(restaurant.address)}
             </div>
           )}
         </div>
@@ -119,10 +151,10 @@ function SearchSummary({ structured }) {
           <strong style={{ color: "#E8A86D" }}>{totalSlots}</strong> time slots
         </span>
         <span style={{ opacity: 0.6 }}>|</span>
-        <span>{p.query || p.cuisine || "All cuisines"}</span>
-        <span>{p.city}</span>
-        <span>{p.date} at {p.time}</span>
-        <span>Party of {p.party_size}</span>
+        <span>{safe(p.query || p.cuisine) || "All cuisines"}</span>
+        <span>{safe(p.city)}</span>
+        <span>{safe(p.date)} at {safe(p.time)}</span>
+        <span>Party of {safe(p.party_size)}</span>
       </div>
     </div>
   );
@@ -132,7 +164,7 @@ function SearchSummary({ structured }) {
 // MAIN APP
 // ============================================================
 
-export default function TableFinder() {
+function TableFinder() {
   const [view, setView] = useState("landing");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -236,7 +268,7 @@ export default function TableFinder() {
     return (
       <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
         <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+          @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap");
           * { box-sizing: border-box; margin: 0; padding: 0; }
           body { background: #1A1612; }
           .cta-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
@@ -317,7 +349,7 @@ export default function TableFinder() {
   return (
     <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+        @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap");
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background: #1A1612; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
