@@ -69,31 +69,38 @@ function PlatformBadge({ platform }) {
   );
 }
 
-function TimeSlotButton({ slot }) {
-  const time = formatTime(slot.time);
-  if (!time) return null;
+function BookingButton({ restaurant }) {
+  const isOpenTable = restaurant.platform === "OpenTable";
+  const bgColor = isOpenTable ? "rgba(218,55,67,0.12)" : "rgba(72,128,255,0.12)";
+  const borderColor = isOpenTable ? "rgba(218,55,67,0.35)" : "rgba(72,128,255,0.35)";
+  const textColor = isOpenTable ? "#DA3743" : "#4880FF";
+  const hoverBg = isOpenTable ? "rgba(218,55,67,0.22)" : "rgba(72,128,255,0.22)";
+  const label = isOpenTable ? "Reserve on OpenTable →" : "Reserve on Resy →";
+
   return (
     <a
-      href={slot.bookingUrl}
+      href={restaurant.bookingUrl}
       target="_blank"
       rel="noopener noreferrer"
-      style={{ display: "inline-block", padding: "8px 16px", background: "rgba(232,168,109,0.1)", border: "1px solid rgba(232,168,109,0.3)", borderRadius: 8, color: "#E8A86D", fontSize: 14, fontWeight: 600, fontFamily: "'Outfit', sans-serif", textDecoration: "none", cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap" }}
-      onMouseEnter={(e) => { e.target.style.background = "rgba(232,168,109,0.2)"; e.target.style.borderColor = "#E8A86D"; }}
-      onMouseLeave={(e) => { e.target.style.background = "rgba(232,168,109,0.1)"; e.target.style.borderColor = "rgba(232,168,109,0.3)"; }}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 8, color: textColor, fontSize: 13, fontWeight: 600, fontFamily: "'Outfit', sans-serif", textDecoration: "none", cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap" }}
+      onMouseEnter={(e) => { e.target.style.background = hoverBg; }}
+      onMouseLeave={(e) => { e.target.style.background = bgColor; }}
     >
-      {time}
-      {slot.type && slot.type !== "Dining Room" && (
-        <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>{safe(slot.type)}</span>
-      )}
+      {label}
     </a>
   );
 }
 
 function RestaurantCard({ restaurant }) {
+  const ratingVal = typeof restaurant.rating === "object"
+    ? restaurant.rating?.average || restaurant.rating?.overall
+    : Number(restaurant.rating);
+  const showRating = ratingVal > 0;
+
   return (
     <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-        <div>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <h3 style={{ margin: 0, fontSize: 18, fontFamily: "'Playfair Display', Georgia, serif", color: "#F0E6D8", fontWeight: 500 }}>
             {restaurant.profileUrl ? (
               <a href={restaurant.profileUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#F0E6D8", textDecoration: "none" }}>
@@ -103,13 +110,10 @@ function RestaurantCard({ restaurant }) {
               restaurant.name
             )}
           </h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
             {restaurant.cuisine && <span>{safe(restaurant.cuisine)}</span>}
             {restaurant.price && <span>{safe(restaurant.price)}</span>}
-            {restaurant.rating != null && (() => {
-              const r = typeof restaurant.rating === "object" ? restaurant.rating.average || restaurant.rating.overall : Number(restaurant.rating);
-              return r > 0 ? <span>{"★".repeat(Math.min(5, Math.round(r)))} {r}</span> : null;
-            })()}
+            {showRating && <span>★ {ratingVal}{restaurant.reviewCount ? ` (${safe(restaurant.reviewCount)})` : ""}</span>}
           </div>
           {restaurant.address && (
             <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>
@@ -120,17 +124,12 @@ function RestaurantCard({ restaurant }) {
         <PlatformBadge platform={restaurant.platform} />
       </div>
 
-      {restaurant.slots?.length > 0 ? (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-          {restaurant.slots.map((slot, i) => (
-            <TimeSlotButton key={i} slot={slot} />
-          ))}
-        </div>
-      ) : (
-        <div style={{ marginTop: 12, fontSize: 13, color: "#6A5E50", fontStyle: "italic" }}>
-          No available slots for this time — try a different time or date
-        </div>
-      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
+        {restaurant.bookingUrl && <BookingButton restaurant={restaurant} />}
+        {restaurant.hasAvailability && (
+          <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -138,8 +137,7 @@ function RestaurantCard({ restaurant }) {
 function SearchSummary({ structured }) {
   if (!structured?.searchParams) return null;
   const p = structured.searchParams;
-  const withSlots = structured.restaurants?.filter((r) => r.slots?.length > 0) || [];
-  const totalSlots = withSlots.reduce((sum, r) => sum + r.slots.length, 0);
+  const available = structured.restaurants?.filter((r) => r.hasAvailability).length || 0;
 
   return (
     <div style={{ background: "rgba(232,168,109,0.05)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#C4B8A8" }}>
@@ -147,14 +145,19 @@ function SearchSummary({ structured }) {
         <span>
           <strong style={{ color: "#E8A86D" }}>{structured.resultCount}</strong> restaurants
         </span>
-        <span>
-          <strong style={{ color: "#E8A86D" }}>{totalSlots}</strong> time slots
-        </span>
+        {available > 0 && (
+          <span>
+            <strong style={{ color: "#6BBF6B" }}>{available}</strong> with availability
+          </span>
+        )}
         <span style={{ opacity: 0.6 }}>|</span>
         <span>{safe(p.query || p.cuisine) || "All cuisines"}</span>
         <span>{safe(p.city)}</span>
         <span>{safe(p.date)} at {safe(p.time)}</span>
         <span>Party of {safe(p.party_size)}</span>
+        {structured.elapsed && (
+          <span style={{ opacity: 0.4, fontSize: 11 }}>{(structured.elapsed / 1000).toFixed(1)}s</span>
+        )}
       </div>
     </div>
   );
@@ -307,7 +310,7 @@ function TableFinder() {
             Every table.<br />One search.
           </h1>
           <p style={{ fontSize: 18, color: "#8A7E70", maxWidth: 480, margin: "0 auto 40px", lineHeight: 1.6 }}>
-            Search OpenTable and Resy simultaneously. Real availability, real time slots, direct booking links.
+            Search OpenTable and Resy simultaneously. Real restaurants, real availability, direct booking links.
           </p>
 
           {/* Search bar */}
@@ -326,7 +329,7 @@ function TableFinder() {
             {[
               { step: "01", title: "Describe", desc: "Tell us what you want. Cuisine, date, party size, location." },
               { step: "02", title: "Discover", desc: "We search OpenTable and Resy simultaneously for real availability." },
-              { step: "03", title: "Book", desc: "Click any time slot to book directly on the platform. No middleman." },
+              { step: "03", title: "Book", desc: "Click to reserve directly on OpenTable or Resy. No middleman." },
             ].map((item) => (
               <div key={item.step} style={{ padding: 20, background: "rgba(255,255,255,0.02)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
                 <div style={{ fontSize: 11, color: "#E8A86D", fontWeight: 600, letterSpacing: 2, marginBottom: 8 }}>{item.step}</div>
