@@ -97,6 +97,28 @@ function RestaurantCard({ restaurant }) {
     : Number(restaurant.rating);
   const showRating = ratingVal > 0;
 
+  // Fallback link card — just a link to search on the platform
+  if (restaurant.isFallbackLink) {
+    return (
+      <a
+        href={restaurant.bookingUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{ display: "block", background: "rgba(255,255,255,0.02)", border: "1px dashed rgba(255,255,255,0.1)", borderRadius: 12, padding: "16px 24px", marginBottom: 12, textDecoration: "none", transition: "all 0.2s" }}
+        onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(232,168,109,0.4)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 15, color: "#E8A86D", fontWeight: 500, fontFamily: "'Outfit', sans-serif" }}>{restaurant.name}</div>
+            <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>{safe(restaurant.address)}</div>
+          </div>
+          <PlatformBadge platform={restaurant.platform} />
+        </div>
+      </a>
+    );
+  }
+
   return (
     <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
