@@ -1,236 +1,157 @@
 "use client";
-
 import { useState, useRef, useEffect } from "react";
 
-// ─── Markdown renderer with clickable booking links ──────────────────
-function RenderMarkdown({ text }) {
-  if (!text) return null;
-  const lines = text.split("\n");
-  const elements = [];
+// ============================================================
+// TableFinder v2 - Real availability, real booking links
+// ============================================================
 
-  const renderInline = (str, key) => {
-    const parts = [];
-    let remaining = str;
-    let idx = 0;
-
-    while (remaining.length > 0) {
-      const linkMatch = remaining.match(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/);
-      const boldMatch = remaining.match(/\*\*(.+?)\*\*/);
-      const urlMatch = remaining.match(/(https?:\/\/[^\s,)<>]+)/);
-
-      let first = null;
-      let firstPos = remaining.length;
-
-      if (linkMatch && remaining.indexOf(linkMatch[0]) < firstPos) {
-        firstPos = remaining.indexOf(linkMatch[0]);
-        first = { type: "link", m: linkMatch };
+function formatTime(dateTimeStr) {
+  if (!dateTimeStr) return "";
+  try {
+    const d = new Date(dateTimeStr);
+    if (isNaN(d.getTime())) {
+      // Try parsing "HH:MM" format
+      const parts = dateTimeStr.match(/(\d{1,2}):(\d{2})/);
+      if (parts) {
+        const h = parseInt(parts[1]);
+        const m = parts[2];
+        const ampm = h >= 12 ? "PM" : "AM";
+        const h12 = h > 12 ? h - 12 : h === 0 ? 12 : h;
+        return `${h12}:${m} ${ampm}`;
       }
-      if (boldMatch && remaining.indexOf(boldMatch[0]) < firstPos) {
-        firstPos = remaining.indexOf(boldMatch[0]);
-        first = { type: "bold", m: boldMatch };
-      }
-      if (!first && urlMatch && remaining.indexOf(urlMatch[0]) < firstPos) {
-        firstPos = remaining.indexOf(urlMatch[0]);
-        first = { type: "url", m: urlMatch };
-      }
-
-      if (!first) {
-        parts.push(<span key={`${key}-${idx++}`}>{remaining}</span>);
-        break;
-      }
-
-      const before = remaining.slice(0, firstPos);
-      if (before) parts.push(<span key={`${key}-${idx++}`}>{before}</span>);
-
-      if (first.type === "link") {
-        const isBooking =
-          first.m[2].includes("opentable") ||
-          first.m[2].includes("resy.com") ||
-          first.m[2].includes("yelp.com") ||
-          first.m[2].includes("exploretock") ||
-          first.m[2].includes("reserve") ||
-          first.m[1].toLowerCase().includes("book");
-
-        parts.push(
-          <a
-            key={`${key}-${idx++}`}
-            href={first.m[2]}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color: isBooking ? "#1A1612" : "#E8A86D",
-              background: isBooking ? "#E8A86D" : "transparent",
-              padding: isBooking ? "4px 12px" : "0",
-              borderRadius: isBooking ? "6px" : "0",
-              textDecoration: "none",
-              borderBottom: isBooking ? "none" : "1px solid rgba(232,168,109,0.3)",
-              fontWeight: isBooking ? 600 : 500,
-              fontSize: isBooking ? "13px" : "inherit",
-              display: isBooking ? "inline-flex" : "inline",
-              alignItems: "center",
-              gap: "4px",
-              transition: "all 0.2s",
-            }}
-            onMouseEnter={(e) => {
-              if (isBooking) {
-                e.target.style.background = "#F0C090";
-                e.target.style.transform = "translateY(-1px)";
-              } else {
-                e.target.style.borderBottomColor = "#E8A86D";
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (isBooking) {
-                e.target.style.background = "#E8A86D";
-                e.target.style.transform = "translateY(0)";
-              } else {
-                e.target.style.borderBottomColor = "rgba(232,168,109,0.3)";
-              }
-            }}
-          >
-            {isBooking && "→ "}
-            {first.m[1]}
-          </a>
-        );
-        remaining = remaining.slice(firstPos + first.m[0].length);
-      } else if (first.type === "bold") {
-        parts.push(
-          <strong key={`${key}-${idx++}`} style={{ color: "#F0E6D8", fontWeight: 600 }}>
-            {first.m[1]}
-          </strong>
-        );
-        remaining = remaining.slice(firstPos + first.m[0].length);
-      } else if (first.type === "url") {
-        const url = first.m[1];
-        const isBooking =
-          url.includes("opentable") ||
-          url.includes("resy.com") ||
-          url.includes("yelp.com/reservations") ||
-          url.includes("exploretock") ||
-          url.includes("sevenrooms");
-
-        const label = isBooking
-          ? url.includes("opentable")
-            ? "Book on OpenTable"
-            : url.includes("resy")
-            ? "Book on Resy"
-            : url.includes("yelp")
-            ? "Book on Yelp"
-            : url.includes("exploretock")
-            ? "Book on Tock"
-            : "Book Now"
-          : url.length > 45
-          ? url.slice(0, 42) + "..."
-          : url;
-
-        parts.push(
-          <a
-            key={`${key}-${idx++}`}
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color: isBooking ? "#1A1612" : "#E8A86D",
-              background: isBooking ? "#E8A86D" : "transparent",
-              padding: isBooking ? "4px 12px" : "0",
-              borderRadius: isBooking ? "6px" : "0",
-              textDecoration: "none",
-              borderBottom: isBooking ? "none" : "1px solid rgba(232,168,109,0.3)",
-              fontWeight: isBooking ? 600 : 500,
-              fontSize: isBooking ? "13px" : "inherit",
-              display: isBooking ? "inline-flex" : "inline",
-              alignItems: "center",
-              gap: "4px",
-              transition: "all 0.2s",
-              wordBreak: isBooking ? "normal" : "break-all",
-            }}
-            onMouseEnter={(e) => {
-              if (isBooking) e.target.style.background = "#F0C090";
-            }}
-            onMouseLeave={(e) => {
-              if (isBooking) e.target.style.background = "#E8A86D";
-            }}
-          >
-            {isBooking && "→ "}
-            {label}
-          </a>
-        );
-        remaining = remaining.slice(firstPos + first.m[0].length);
-      }
+      return dateTimeStr;
     }
-    return parts;
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.match(/^---+$/)) {
-      elements.push(
-        <hr key={i} style={{ border: "none", borderTop: "1px solid rgba(255,255,255,0.06)", margin: "18px 0" }} />
-      );
-    } else if (line.match(/^### /)) {
-      elements.push(
-        <h3 key={i} style={{ fontSize: "17px", fontWeight: 600, color: "#F0E6D8", margin: "22px 0 6px", fontFamily: "'Playfair Display', Georgia, serif" }}>
-          {renderInline(line.replace(/^### /, ""), `h3-${i}`)}
-        </h3>
-      );
-    } else if (line.match(/^## /)) {
-      elements.push(
-        <h2 key={i} style={{ fontSize: "20px", fontWeight: 600, color: "#F0E6D8", margin: "24px 0 8px", fontFamily: "'Playfair Display', Georgia, serif" }}>
-          {renderInline(line.replace(/^## /, ""), `h2-${i}`)}
-        </h2>
-      );
-    } else if (line.trim() === "") {
-      elements.push(<div key={i} style={{ height: "6px" }} />);
-    } else {
-      elements.push(
-        <p key={i} style={{ margin: "3px 0", lineHeight: 1.7, color: "#C4B8A8" }}>
-          {renderInline(line, `p-${i}`)}
-        </p>
-      );
-    }
+    return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  } catch {
+    return dateTimeStr;
   }
-  return <>{elements}</>;
 }
 
-const STATUS_MESSAGES = [
-  "Understanding your preferences...",
-  "Searching OpenTable...",
-  "Checking Resy...",
-  "Scanning Yelp reservations...",
-  "Checking Google Reserve...",
-  "Cross-referencing platforms...",
-  "Compiling your options...",
-];
+function PlatformBadge({ platform }) {
+  const colors = {
+    OpenTable: { bg: "rgba(218,55,67,0.12)", text: "#DA3743", border: "rgba(218,55,67,0.25)" },
+    Resy: { bg: "rgba(0,100,255,0.08)", text: "#4A90D9", border: "rgba(0,100,255,0.2)" },
+  };
+  const c = colors[platform] || { bg: "rgba(255,255,255,0.05)", text: "#aaa", border: "rgba(255,255,255,0.1)" };
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.2, color: c.text, background: c.bg, border: `1px solid ${c.border}`, padding: "3px 8px", borderRadius: 4 }}>
+      {platform}
+    </span>
+  );
+}
 
-const QUICK_SEARCHES = [
-  { label: "Italian tonight, 2 people", icon: "🍝" },
-  { label: "Brunch Saturday, party of 4", icon: "🥂" },
-  { label: "Steakhouse Friday 8pm, 2 people", icon: "🥩" },
-  { label: "Sushi this weekend, 4 people", icon: "🍣" },
-];
+function TimeSlotButton({ slot }) {
+  const time = formatTime(slot.time);
+  if (!time) return null;
+  return (
+    <a
+      href={slot.bookingUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{ display: "inline-block", padding: "8px 16px", background: "rgba(232,168,109,0.1)", border: "1px solid rgba(232,168,109,0.3)", borderRadius: 8, color: "#E8A86D", fontSize: 14, fontWeight: 600, fontFamily: "'Outfit', sans-serif", textDecoration: "none", cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap" }}
+      onMouseEnter={(e) => { e.target.style.background = "rgba(232,168,109,0.2)"; e.target.style.borderColor = "#E8A86D"; }}
+      onMouseLeave={(e) => { e.target.style.background = "rgba(232,168,109,0.1)"; e.target.style.borderColor = "rgba(232,168,109,0.3)"; }}
+    >
+      {time}
+      {slot.type && slot.type !== "Dining Room" && (
+        <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>{slot.type}</span>
+      )}
+    </a>
+  );
+}
 
-const PLATFORMS = ["OpenTable", "Resy", "Yelp", "Google Reserve", "Tock", "Direct"];
+function RestaurantCard({ restaurant }) {
+  return (
+    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div>
+          <h3 style={{ margin: 0, fontSize: 18, fontFamily: "'Playfair Display', Georgia, serif", color: "#F0E6D8", fontWeight: 500 }}>
+            {restaurant.profileUrl ? (
+              <a href={restaurant.profileUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#F0E6D8", textDecoration: "none" }}>
+                {restaurant.name}
+              </a>
+            ) : (
+              restaurant.name
+            )}
+          </h3>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
+            {restaurant.cuisine && <span>{restaurant.cuisine}</span>}
+            {restaurant.price && <span>{restaurant.price}</span>}
+            {restaurant.rating && <span>{"★".repeat(Math.round(restaurant.rating))} {restaurant.rating}</span>}
+          </div>
+          {restaurant.address && (
+            <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>
+              {restaurant.address}
+            </div>
+          )}
+        </div>
+        <PlatformBadge platform={restaurant.platform} />
+      </div>
+
+      {restaurant.slots?.length > 0 ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          {restaurant.slots.map((slot, i) => (
+            <TimeSlotButton key={i} slot={slot} />
+          ))}
+        </div>
+      ) : (
+        <div style={{ marginTop: 12, fontSize: 13, color: "#6A5E50", fontStyle: "italic" }}>
+          No available slots for this time — try a different time or date
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchSummary({ structured }) {
+  if (!structured?.searchParams) return null;
+  const p = structured.searchParams;
+  const withSlots = structured.restaurants?.filter((r) => r.slots?.length > 0) || [];
+  const totalSlots = withSlots.reduce((sum, r) => sum + r.slots.length, 0);
+
+  return (
+    <div style={{ background: "rgba(232,168,109,0.05)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#C4B8A8" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
+        <span>
+          <strong style={{ color: "#E8A86D" }}>{structured.resultCount}</strong> restaurants
+        </span>
+        <span>
+          <strong style={{ color: "#E8A86D" }}>{totalSlots}</strong> time slots
+        </span>
+        <span style={{ opacity: 0.6 }}>|</span>
+        <span>{p.query || p.cuisine || "All cuisines"}</span>
+        <span>{p.city}</span>
+        <span>{p.date} at {p.time}</span>
+        <span>Party of {p.party_size}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
 
 export default function TableFinder() {
   const [view, setView] = useState("landing");
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [statusIdx, setStatusIdx] = useState(0);
   const [userLocation, setUserLocation] = useState(null);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState(false);
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
-  const statusTimer = useRef(null);
 
-  useEffect(() => {
-    if (!navigator.geolocation) return;
+  const detectLocation = () => {
+    if (!navigator.geolocation) { setLocationError(true); return; }
+    setLocationLoading(true);
+    setLocationError(false);
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const { latitude, longitude } = pos.coords;
         try {
-          const res = await fetch(
-            `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
-          );
+          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
           const data = await res.json();
           setUserLocation({
             city: data.city || data.locality || "",
@@ -242,41 +163,35 @@ export default function TableFinder() {
         } catch {
           setUserLocation({ city: "", region: "", country: "", lat: latitude, lng: longitude });
         }
+        setLocationLoading(false);
       },
-      () => {}
+      (err) => {
+        console.error("Geolocation error:", err.code, err.message);
+        setLocationError(true);
+        setLocationLoading(false);
+      },
+      { timeout: 10000 }
     );
-  }, []);
+  };
+
+  useEffect(() => { detectLocation(); }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
-
-  useEffect(() => {
-    if (loading) {
-      setStatusIdx(0);
-      statusTimer.current = setInterval(() => {
-        setStatusIdx((p) => Math.min(p + 1, STATUS_MESSAGES.length - 1));
-      }, 2400);
-    } else {
-      clearInterval(statusTimer.current);
-    }
-    return () => clearInterval(statusTimer.current);
-  }, [loading]);
+  }, [messages]);
 
   const send = async (overrideText) => {
     const text = (overrideText || input).trim();
     if (!text || loading) return;
     setInput("");
-    if (view === "landing") setView("agent");
-
-    const userMsg = { role: "user", content: text };
-    const updated = [...messages, userMsg];
-    setMessages(updated);
     setLoading(true);
 
+    const userMsg = { role: "user", content: text };
+    setMessages((prev) => [...prev, userMsg]);
+
     try {
-      const apiMessages = updated.map((m) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
+      const apiMessages = [...messages, userMsg].map((m) => ({
+        role: m.role,
         content: m.content,
       }));
 
@@ -288,151 +203,134 @@ export default function TableFinder() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Request failed" }));
-        if (res.status === 429) {
-          throw new Error("You've hit the search limit. Grab a drink and try again shortly.");
-        }
         throw new Error(err.error || `HTTP ${res.status}`);
       }
 
       const data = await res.json();
-      const timestamp = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: data.content || "I couldn't find results. Try being more specific about location and cuisine.",
-          searchCount: data.searchCount || 0,
+          content: data.reply || "No results found.",
+          structured: data.structured || null,
           cached: data.cached || false,
-          cacheAge: data.cacheAge || 0,
-          timestamp,
+          searchParams: data.searchParams || null,
         },
       ]);
-    } catch (err) {
+    } catch (e) {
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: `Something went wrong: ${err.message}. Please try again.`,
-          error: true,
-        },
+        { role: "assistant", content: `Something went wrong: ${e.message}. Please try again.` },
       ]);
-    } finally {
-      setLoading(false);
     }
+
+    setLoading(false);
   };
 
-  // ═══════════════════════════════════════════════════════════════
+  // ============================================================
   // LANDING PAGE
-  // ═══════════════════════════════════════════════════════════════
+  // ============================================================
+
   if (view === "landing") {
     return (
-      <div style={{ minHeight: "100vh", background: "#12100E", fontFamily: "'Outfit', sans-serif" }}>
-        <style>{globalCSS}</style>
-        <nav style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, background: "rgba(18,16,14,0.8)", backdropFilter: "blur(24px)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-          <div style={{ maxWidth: 1100, margin: "0 auto", padding: "14px 28px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { background: #1A1612; }
+          .cta-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        `}</style>
+
+        <nav style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+          <div style={{ maxWidth: 1000, margin: "0 auto", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 24 }}>&#9673;</span>
+              <span style={{ fontSize: 24, color: "#E8A86D" }}>&#9673;</span>
               <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 20, color: "#F0E6D8", fontWeight: 500 }}>TableFinder</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              {userLocation?.city && (
+              {userLocation?.city ? (
                 <span style={{ fontSize: 13, color: "#8A7E70", fontWeight: 500 }}>
                   📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
                 </span>
+              ) : (
+                <button onClick={detectLocation} disabled={locationLoading}
+                  style={{ fontSize: 13, color: "#E8A86D", fontWeight: 500, background: "none", border: "1px solid rgba(232,168,109,0.25)", borderRadius: 20, padding: "5px 12px", cursor: "pointer", fontFamily: "'Outfit', sans-serif" }}>
+                  {locationLoading ? "Detecting..." : locationError ? "📍 Enable location" : "📍 Detect my location"}
+                </button>
               )}
-              <button onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }} className="cta-btn" style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "9px 20px", borderRadius: 8, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
+              <button onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }} className="cta-btn"
+                style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "9px 20px", borderRadius: 8, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
                 Find a Table →
               </button>
             </div>
           </div>
         </nav>
 
-        <section style={{ position: "relative", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "radial-gradient(ellipse at 50% 30%, rgba(232,168,109,0.06) 0%, transparent 60%)" }}>
-          <div style={{ position: "relative", zIndex: 2, textAlign: "center", padding: "120px 28px 60px", maxWidth: 740 }}>
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(232,168,109,0.1)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 24, padding: "6px 16px", marginBottom: 28, fontSize: 12, fontWeight: 500, color: "#E8A86D", letterSpacing: "0.5px", animation: "fadeUp 0.8s ease both" }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: "pulse 2s infinite" }} />
-              AI-Powered Reservation Search
-            </div>
+        {/* Hero */}
+        <div style={{ maxWidth: 700, margin: "0 auto", padding: "100px 24px 60px", textAlign: "center" }}>
+          <h1 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: "clamp(36px, 6vw, 56px)", fontWeight: 400, lineHeight: 1.15, color: "#F0E6D8", marginBottom: 20 }}>
+            Every table.<br />One search.
+          </h1>
+          <p style={{ fontSize: 18, color: "#8A7E70", maxWidth: 480, margin: "0 auto 40px", lineHeight: 1.6 }}>
+            Search OpenTable and Resy simultaneously. Real availability, real time slots, direct booking links.
+          </p>
 
-            <h1 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: "clamp(40px, 7vw, 68px)", fontWeight: 500, color: "#F0E6D8", lineHeight: 1.1, marginBottom: 20, letterSpacing: "-0.02em", animation: "fadeUp 0.8s ease 0.05s both" }}>
-              Stop searching.<br /><span style={{ color: "#E8A86D" }}>Start dining.</span>
-            </h1>
-
-            <p style={{ fontSize: 17, color: "#8A7E70", lineHeight: 1.65, maxWidth: 520, margin: "0 auto 40px", fontWeight: 300, animation: "fadeUp 0.8s ease 0.1s both" }}>
-              One search across OpenTable, Resy, Yelp, and more. Tell us what you want &mdash; our AI finds every available table with direct booking links.
-            </p>
-
-            <div style={{ maxWidth: 620, margin: "0 auto", animation: "fadeUp 0.8s ease 0.2s both" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "8px 8px 8px 18px", boxShadow: "0 8px 40px rgba(0,0,0,0.3), 0 0 0 1px rgba(232,168,109,0.05)" }}>
-                <span style={{ fontSize: 20, opacity: 0.4 }}>🔍</span>
-                <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={userLocation?.city ? `Italian dinner for 2 tonight in ${userLocation.city}...` : "Italian dinner for 2 tonight in Manhattan..."} style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }} />
-                <button onClick={() => send()} disabled={!input.trim()} className="cta-btn" style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "12px 22px", borderRadius: 10, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: input.trim() ? "pointer" : "default", whiteSpace: "nowrap", opacity: input.trim() ? 1 : 0.4, transition: "all 0.2s", flexShrink: 0 }}>
-                  Search All Platforms
-                </button>
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 16 }}>
-                {QUICK_SEARCHES.map((q, i) => (
-                  <button key={i} className="chip" onClick={() => send(q.label)} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, padding: "7px 14px", fontSize: 13, fontFamily: "'Outfit', sans-serif", color: "#8A7E70", cursor: "pointer", transition: "all 0.2s", display: "flex", alignItems: "center", gap: 6, animation: `fadeUp 0.5s ease ${0.35 + i * 0.07}s both` }}>
-                    <span>{q.icon}</span> {q.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 56, display: "flex", flexDirection: "column", alignItems: "center", gap: 14, animation: "fadeUp 0.8s ease 0.5s both" }}>
-              <span style={{ fontSize: 11, letterSpacing: "1.5px", textTransform: "uppercase", color: "rgba(255,255,255,0.2)", fontWeight: 500 }}>Searches across</span>
-              <div style={{ display: "flex", gap: 28, flexWrap: "wrap", justifyContent: "center" }}>
-                {PLATFORMS.map((p) => (
-                  <span key={p} style={{ fontSize: 13, color: "rgba(255,255,255,0.3)", fontWeight: 500, letterSpacing: "0.5px" }}>{p}</span>
-                ))}
-              </div>
-            </div>
+          {/* Search bar */}
+          <div onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }}
+            style={{ maxWidth: 520, margin: "0 auto", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "14px 20px", cursor: "text", display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 20, opacity: 0.4 }}>🔍</span>
+            <span style={{ color: "#6A5E50", fontSize: 15 }}>
+              {userLocation?.city ? `Italian for 2, tonight in ${userLocation.city}...` : "Italian for 2, tonight in Atlanta..."}
+            </span>
           </div>
-          <div style={{ position: "absolute", inset: 0, zIndex: 1, backgroundImage: "linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px)", backgroundSize: "80px 80px", maskImage: "radial-gradient(ellipse at 50% 40%, black 20%, transparent 70%)", WebkitMaskImage: "radial-gradient(ellipse at 50% 40%, black 20%, transparent 70%)" }} />
-        </section>
+        </div>
 
-        <section style={{ maxWidth: 1000, margin: "0 auto", padding: "80px 28px 100px" }}>
-          <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 500, color: "#F0E6D8", textAlign: "center", marginBottom: 48 }}>Three steps to your table</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 20 }}>
+        {/* How it works */}
+        <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px 80px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 24 }}>
             {[
-              { step: "01", title: "Describe", icon: "💬", desc: "Tell us what you want in plain English. Location, date, party size, cuisine — whatever matters to you." },
-              { step: "02", title: "Discover", icon: "🔍", desc: "AI searches every major reservation platform simultaneously, finding options you'd miss checking one by one." },
-              { step: "03", title: "Dine", icon: "🍽", desc: "Click through directly to the platform to complete your reservation. No middleman, no markup, no new account." },
-            ].map((item, i) => (
-              <div key={i} style={{ background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, padding: "32px 24px", textAlign: "center", animation: `fadeUp 0.6s ease ${0.1 + i * 0.12}s both` }}>
-                <div style={{ fontSize: 11, letterSpacing: "2px", color: "#E8A86D", fontWeight: 600, marginBottom: 4 }}>{item.step}</div>
-                <div style={{ fontSize: 32, margin: "12px 0" }}>{item.icon}</div>
-                <h3 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 22, color: "#F0E6D8", fontWeight: 500, marginBottom: 10 }}>{item.title}</h3>
-                <p style={{ fontSize: 14, color: "#8A7E70", lineHeight: 1.6, fontWeight: 300 }}>{item.desc}</p>
+              { step: "01", title: "Describe", desc: "Tell us what you want. Cuisine, date, party size, location." },
+              { step: "02", title: "Discover", desc: "We search OpenTable and Resy simultaneously for real availability." },
+              { step: "03", title: "Book", desc: "Click any time slot to book directly on the platform. No middleman." },
+            ].map((item) => (
+              <div key={item.step} style={{ padding: 20, background: "rgba(255,255,255,0.02)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
+                <div style={{ fontSize: 11, color: "#E8A86D", fontWeight: 600, letterSpacing: 2, marginBottom: 8 }}>{item.step}</div>
+                <div style={{ fontSize: 16, fontWeight: 500, color: "#F0E6D8", marginBottom: 6 }}>{item.title}</div>
+                <div style={{ fontSize: 13, color: "#8A7E70", lineHeight: 1.5 }}>{item.desc}</div>
               </div>
             ))}
           </div>
-        </section>
+        </div>
 
-        <footer style={{ borderTop: "1px solid rgba(255,255,255,0.06)", padding: "32px 28px", maxWidth: 1100, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-            <span style={{ fontSize: 16 }}>&#9673;</span>
-            <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 16, color: "#F0E6D8" }}>TableFinder</span>
-          </div>
-          <p style={{ fontSize: 12, color: "rgba(255,255,255,0.25)" }}>AI-powered reservation discovery. Bookings are completed directly on each platform.</p>
+        <footer style={{ textAlign: "center", padding: "20px 24px", fontSize: 11, color: "rgba(255,255,255,0.15)" }}>
+          Real availability from OpenTable & Resy · tablefinder.ai
         </footer>
       </div>
     );
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  // AGENT CHAT VIEW
-  // ═══════════════════════════════════════════════════════════════
-  return (
-    <div style={{ minHeight: "100vh", background: "#12100E", fontFamily: "'Outfit', sans-serif" }}>
-      <style>{globalCSS}</style>
+  // ============================================================
+  // AGENT / SEARCH VIEW
+  // ============================================================
 
-      <header style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(18,16,14,0.85)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+  return (
+    <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #1A1612; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .result-card { animation: fadeIn 0.3s ease-out; }
+      `}</style>
+
+      {/* Header */}
+      <header style={{ position: "sticky", top: 0, background: "rgba(26,22,18,0.95)", backdropFilter: "blur(12px)", zIndex: 10, borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
         <div style={{ maxWidth: 780, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={() => setView("landing")} style={{ background: "none", border: "none", color: "#C4B8A8", cursor: "pointer", fontSize: 18, padding: 4 }}>←</button>
-            <span style={{ fontSize: 18 }}>&#9673;</span>
+            <span style={{ fontSize: 18, color: "#E8A86D" }}>&#9673;</span>
             <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 18, color: "#F0E6D8", fontWeight: 400 }}>TableFinder</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -440,25 +338,44 @@ export default function TableFinder() {
               <div style={{ width: 6, height: 6, borderRadius: "50%", background: loading ? "#E8A86D" : "#7BC47F", animation: loading ? "pulse 1.2s infinite" : "none" }} />
               {loading ? "Searching" : "Ready"}
             </div>
-            {userLocation?.city && (
-              <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
+            {userLocation?.city ? (
+              <div style={{ fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
                 📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
               </div>
+            ) : (
+              <button onClick={detectLocation} disabled={locationLoading}
+                style={{ fontSize: 11, color: "#E8A86D", fontWeight: 500, background: "none", border: "1px solid rgba(232,168,109,0.25)", borderRadius: 16, padding: "4px 10px", cursor: "pointer", fontFamily: "'Outfit', sans-serif" }}>
+                {locationLoading ? "..." : "📍 Detect"}
+              </button>
             )}
           </div>
         </div>
       </header>
 
+      {/* Chat area */}
       <main style={{ maxWidth: 780, margin: "0 auto", padding: "20px 20px 170px", minHeight: "calc(100vh - 56px)" }}>
-        {messages.length === 0 && !loading && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "60vh", animation: "fadeUp 0.5s ease" }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>&#9673;</div>
-            <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 28, color: "#F0E6D8", fontWeight: 400, marginBottom: 8 }}>What are you craving?</h2>
-            <p style={{ color: "#8A7E70", fontSize: 14, maxWidth: 400, margin: "0 auto 24px", textAlign: "center" }}>Describe your ideal meal &mdash; I'll find available tables across every platform.</p>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
-              {QUICK_SEARCHES.map((q, i) => (
-                <button key={i} className="chip" onClick={() => send(q.label)} style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "8px 14px", fontSize: 13, fontFamily: "'Outfit', sans-serif", color: "#8A7E70", cursor: "pointer", transition: "all 0.2s" }}>
-                  {q.icon} {q.label}
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", padding: "80px 20px" }}>
+            <div style={{ fontSize: 48, marginBottom: 16, color: "#E8A86D" }}>&#9673;</div>
+            <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 24, fontWeight: 400, marginBottom: 8 }}>What are you in the mood for?</h2>
+            <p style={{ color: "#8A7E70", fontSize: 15 }}>Search across OpenTable & Resy with real-time availability</p>
+
+            {/* Quick suggestions */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 24 }}>
+              {[
+                "Mexican for 2 tonight",
+                "Italian fine dining Saturday",
+                "Sushi this Friday, 4 people",
+                "Brunch Sunday for 6",
+              ].map((suggestion) => (
+                <button
+                  key={suggestion}
+                  onClick={() => { send(suggestion); }}
+                  style={{ padding: "8px 16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, color: "#C4B8A8", fontSize: 13, cursor: "pointer", fontFamily: "'Outfit', sans-serif", transition: "all 0.2s" }}
+                  onMouseEnter={(e) => { e.target.style.borderColor = "rgba(232,168,109,0.3)"; e.target.style.color = "#E8A86D"; }}
+                  onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.08)"; e.target.style.color = "#C4B8A8"; }}
+                >
+                  {suggestion}
                 </button>
               ))}
             </div>
@@ -466,99 +383,81 @@ export default function TableFinder() {
         )}
 
         {messages.map((msg, i) => (
-          <div key={i} style={{ marginBottom: 22, animation: "fadeUp 0.35s ease" }}>
+          <div key={i} style={{ marginBottom: 16 }}>
             {msg.role === "user" ? (
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <div style={{ background: "#E8A86D", color: "#1A1612", padding: "12px 18px", borderRadius: "18px 18px 4px 18px", maxWidth: "75%", fontSize: 15, lineHeight: 1.5, fontWeight: 500 }}>{msg.content}</div>
+                <div style={{ background: "#E8A86D", color: "#1A1612", padding: "10px 18px", borderRadius: "16px 16px 4px 16px", maxWidth: "75%", fontSize: 15, fontWeight: 500 }}>
+                  {msg.content}
+                </div>
               </div>
             ) : (
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
-                  <span style={{ fontSize: 14 }}>&#9673;</span>
-                  TableFinder
-                  {msg.searchCount > 0 && !msg.cached && (
-                    <span style={{ background: "rgba(232,168,109,0.08)", border: "1px solid rgba(232,168,109,0.12)", borderRadius: 10, padding: "2px 8px", fontSize: 11, color: "#E8A86D", fontWeight: 500 }}>
-                      {msg.searchCount} searches
-                    </span>
-                  )}
-                  {msg.cached && (
-                    <span style={{ background: "rgba(123,196,127,0.08)", border: "1px solid rgba(123,196,127,0.12)", borderRadius: 10, padding: "2px 8px", fontSize: 11, color: "#7BC47F", fontWeight: 500 }}>
-                      ⚡ cached {msg.cacheAge > 0 ? `(${msg.cacheAge}m ago)` : "(just now)"}
-                    </span>
-                  )}
-                  {msg.timestamp && (
-                    <span style={{ fontSize: 11, color: "#5A5248", marginLeft: "auto" }}>{msg.timestamp}</span>
-                  )}
-                </div>
-                <div style={{ marginLeft: 22, background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "4px 16px 16px 16px", padding: "18px 22px", fontSize: 14, lineHeight: 1.7 }}>
-                  <RenderMarkdown text={msg.content} />
-                </div>
+              <div className="result-card">
+                {/* Cached badge */}
+                {msg.cached && (
+                  <div style={{ fontSize: 11, color: "#7BC47F", marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                    ⚡ cached results
+                  </div>
+                )}
+
+                {/* Structured results */}
+                {msg.structured?.restaurants?.length > 0 ? (
+                  <div>
+                    <SearchSummary structured={msg.structured} />
+                    {msg.structured.restaurants.map((restaurant, j) => (
+                      <RestaurantCard key={j} restaurant={restaurant} />
+                    ))}
+                  </div>
+                ) : (
+                  /* Text-only response */
+                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", padding: "14px 20px", borderRadius: "16px 16px 16px 4px", maxWidth: "90%", fontSize: 15, lineHeight: 1.6, color: "#C4B8A8" }}>
+                    {msg.content}
+                  </div>
+                )}
               </div>
             )}
           </div>
         ))}
 
         {loading && (
-          <div style={{ animation: "fadeUp 0.3s ease" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
-              <span style={{ fontSize: 14 }}>&#9673;</span>
-              TableFinder
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0", color: "#8A7E70", fontSize: 14 }}>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[0, 1, 2].map((i) => (
+                <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: `pulse 1.2s infinite ${i * 0.2}s` }} />
+              ))}
             </div>
-            <div style={{ marginLeft: 22, display: "inline-flex", alignItems: "center", gap: 12, background: "#1A1612", border: "1px solid rgba(232,168,109,0.1)", borderRadius: 12, padding: "14px 20px" }}>
-              <div style={{ display: "flex", gap: 4 }}>
-                {[0, 1, 2].map((d) => (
-                  <span key={d} style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: "dotBounce 1.2s infinite", animationDelay: `${d * 0.15}s` }} />
-                ))}
-              </div>
-              <span style={{ color: "#E8A86D", fontSize: 13, fontWeight: 500 }}>{STATUS_MESSAGES[statusIdx]}</span>
-            </div>
+            Searching OpenTable & Resy...
           </div>
         )}
 
         <div ref={chatEndRef} />
       </main>
 
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100, background: "linear-gradient(transparent, #12100E 30%)", padding: "24px 20px 20px" }}>
-        <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", gap: 8, alignItems: "center", background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "5px 5px 5px 18px", boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
-          <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={userLocation?.city ? `Sushi for 4, this Saturday, ${userLocation.city}...` : "Sushi for 4, this Saturday, downtown..."} disabled={loading} style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }} />
-          <button onClick={() => send()} disabled={!input.trim() || loading} style={{ width: 42, height: 42, borderRadius: 10, border: "none", fontSize: 18, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s", flexShrink: 0, background: input.trim() && !loading ? "#E8A86D" : "rgba(255,255,255,0.06)", color: input.trim() && !loading ? "#1A1612" : "#5A5248", cursor: input.trim() && !loading ? "pointer" : "default" }}>
-            ↑
-          </button>
+      {/* Input bar */}
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, #1A1612 30%)", padding: "40px 20px 20px" }}>
+        <div style={{ maxWidth: 780, margin: "0 auto" }}>
+          <div style={{ display: "flex", gap: 10, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "6px 6px 6px 18px", alignItems: "center" }}>
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder={userLocation?.city ? `Sushi for 4, this Saturday, ${userLocation.city}...` : "Sushi for 4, this Saturday, downtown..."}
+              disabled={loading}
+              style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }}
+            />
+            <button
+              onClick={send}
+              disabled={loading || !input.trim()}
+              style={{ background: input.trim() ? "#E8A86D" : "rgba(232,168,109,0.2)", color: "#1A1612", border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 16, cursor: input.trim() ? "pointer" : "default", transition: "all 0.2s", fontWeight: 600 }}
+            >
+              ↑
+            </button>
+          </div>
+          <p style={{ textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.15)", marginTop: 8 }}>
+            Real availability from OpenTable & Resy · tablefinder.ai
+          </p>
         </div>
-        <p style={{ textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.2)", marginTop: 8 }}>Results link directly to booking platforms · tablefinder.ai</p>
       </div>
     </div>
   );
 }
-
-const globalCSS = `
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #12100E; }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(16px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-  @keyframes dotBounce {
-    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-    40% { transform: scale(1); opacity: 1; }
-  }
-  input::placeholder { color: #8A7E70; }
-  .chip:hover {
-    background: rgba(232,168,109,0.1) !important;
-    border-color: rgba(232,168,109,0.25) !important;
-  }
-  .cta-btn:hover {
-    filter: brightness(1.1);
-    transform: translateY(-1px);
-  }
-  ::-webkit-scrollbar { width: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-  @media (max-width: 600px) {
-    h1 { font-size: 36px !important; }
-  }
-`;
