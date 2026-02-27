@@ -88,7 +88,7 @@ function RenderMarkdown({ text }) {
               }
             }}
           >
-            {isBooking && "\u2192 "}
+            {isBooking && "→ "}
             {first.m[1]}
           </a>
         );
@@ -151,7 +151,7 @@ function RenderMarkdown({ text }) {
               if (isBooking) e.target.style.background = "#E8A86D";
             }}
           >
-            {isBooking && "\u2192 "}
+            {isBooking && "→ "}
             {label}
           </a>
         );
@@ -203,10 +203,10 @@ const STATUS_MESSAGES = [
 ];
 
 const QUICK_SEARCHES = [
-  { label: "Italian tonight, 2 people", icon: "\uD83C\uDF5D" },
-  { label: "Brunch Saturday, party of 4", icon: "\uD83E\uDD42" },
-  { label: "Steakhouse Friday 8pm, 2 people", icon: "\uD83E\uDD69" },
-  { label: "Sushi this weekend, 4 people", icon: "\uD83C\uDF63" },
+  { label: "Italian tonight, 2 people", icon: "🍝" },
+  { label: "Brunch Saturday, party of 4", icon: "🥂" },
+  { label: "Steakhouse Friday 8pm, 2 people", icon: "🥩" },
+  { label: "Sushi this weekend, 4 people", icon: "🍣" },
 ];
 
 const PLATFORMS = ["OpenTable", "Resy", "Yelp", "Google Reserve", "Tock", "Direct"];
@@ -338,11 +338,11 @@ export default function TableFinder() {
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               {userLocation?.city && (
                 <span style={{ fontSize: 13, color: "#8A7E70", fontWeight: 500 }}>
-                  \uD83D\uDCCD {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
+                  📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
                 </span>
               )}
               <button onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }} className="cta-btn" style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "9px 20px", borderRadius: 8, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
-                Find a Table \u2192
+                Find a Table →
               </button>
             </div>
           </div>
@@ -365,7 +365,7 @@ export default function TableFinder() {
 
             <div style={{ maxWidth: 620, margin: "0 auto", animation: "fadeUp 0.8s ease 0.2s both" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "8px 8px 8px 18px", boxShadow: "0 8px 40px rgba(0,0,0,0.3), 0 0 0 1px rgba(232,168,109,0.05)" }}>
-                <span style={{ fontSize: 20, opacity: 0.4 }}>\uD83D\uDD0D</span>
+                <span style={{ fontSize: 20, opacity: 0.4 }}>🔍</span>
                 <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={userLocation?.city ? `Italian dinner for 2 tonight in ${userLocation.city}...` : "Italian dinner for 2 tonight in Manhattan..."} style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }} />
                 <button onClick={() => send()} disabled={!input.trim()} className="cta-btn" style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "12px 22px", borderRadius: 10, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: input.trim() ? "pointer" : "default", whiteSpace: "nowrap", opacity: input.trim() ? 1 : 0.4, transition: "all 0.2s", flexShrink: 0 }}>
                   Search All Platforms
@@ -396,9 +396,9 @@ export default function TableFinder() {
           <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 32, fontWeight: 500, color: "#F0E6D8", textAlign: "center", marginBottom: 48 }}>Three steps to your table</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 20 }}>
             {[
-              { step: "01", title: "Describe", icon: "\uD83D\uDCAC", desc: "Tell us what you want in plain English. Location, date, party size, cuisine \u2014 whatever matters to you." },
-              { step: "02", title: "Discover", icon: "\uD83D\uDD0D", desc: "AI searches every major reservation platform simultaneously, finding options you'd miss checking one by one." },
-              { step: "03", title: "Dine", icon: "\uD83C\uDF7D", desc: "Click through directly to the platform to complete your reservation. No middleman, no markup, no new account." },
+              { step: "01", title: "Describe", icon: "💬", desc: "Tell us what you want in plain English. Location, date, party size, cuisine — whatever matters to you." },
+              { step: "02", title: "Discover", icon: "🔍", desc: "AI searches every major reservation platform simultaneously, finding options you'd miss checking one by one." },
+              { step: "03", title: "Dine", icon: "🍽", desc: "Click through directly to the platform to complete your reservation. No middleman, no markup, no new account." },
             ].map((item, i) => (
               <div key={i} style={{ background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 16, padding: "32px 24px", textAlign: "center", animation: `fadeUp 0.6s ease ${0.1 + i * 0.12}s both` }}>
                 <div style={{ fontSize: 11, letterSpacing: "2px", color: "#E8A86D", fontWeight: 600, marginBottom: 4 }}>{item.step}</div>
@@ -431,7 +431,7 @@ export default function TableFinder() {
       <header style={{ position: "sticky", top: 0, zIndex: 100, background: "rgba(18,16,14,0.85)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         <div style={{ maxWidth: 780, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button onClick={() => setView("landing")} style={{ background: "none", border: "none", color: "#C4B8A8", cursor: "pointer", fontSize: 18, padding: 4 }}>\u2190</button>
+            <button onClick={() => setView("landing")} style={{ background: "none", border: "none", color: "#C4B8A8", cursor: "pointer", fontSize: 18, padding: 4 }}>←</button>
             <span style={{ fontSize: 18 }}>&#9673;</span>
             <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 18, color: "#F0E6D8", fontWeight: 400 }}>TableFinder</span>
           </div>
@@ -442,7 +442,7 @@ export default function TableFinder() {
             </div>
             {userLocation?.city && (
               <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
-                \uD83D\uDCCD {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
+                📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
               </div>
             )}
           </div>
@@ -483,7 +483,7 @@ export default function TableFinder() {
                   )}
                   {msg.cached && (
                     <span style={{ background: "rgba(123,196,127,0.08)", border: "1px solid rgba(123,196,127,0.12)", borderRadius: 10, padding: "2px 8px", fontSize: 11, color: "#7BC47F", fontWeight: 500 }}>
-                      \u26A1 cached {msg.cacheAge > 0 ? `(${msg.cacheAge}m ago)` : "(just now)"}
+                      ⚡ cached {msg.cacheAge > 0 ? `(${msg.cacheAge}m ago)` : "(just now)"}
                     </span>
                   )}
                   {msg.timestamp && (
@@ -522,10 +522,10 @@ export default function TableFinder() {
         <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", gap: 8, alignItems: "center", background: "#1A1612", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "5px 5px 5px 18px", boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
           <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={userLocation?.city ? `Sushi for 4, this Saturday, ${userLocation.city}...` : "Sushi for 4, this Saturday, downtown..."} disabled={loading} style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }} />
           <button onClick={() => send()} disabled={!input.trim() || loading} style={{ width: 42, height: 42, borderRadius: 10, border: "none", fontSize: 18, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s", flexShrink: 0, background: input.trim() && !loading ? "#E8A86D" : "rgba(255,255,255,0.06)", color: input.trim() && !loading ? "#1A1612" : "#5A5248", cursor: input.trim() && !loading ? "pointer" : "default" }}>
-            \u2191
+            ↑
           </button>
         </div>
-        <p style={{ textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.2)", marginTop: 8 }}>Results link directly to booking platforms \u00B7 tablefinder.ai</p>
+        <p style={{ textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.2)", marginTop: 8 }}>Results link directly to booking platforms · tablefinder.ai</p>
       </div>
     </div>
   );
