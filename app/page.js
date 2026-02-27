@@ -189,11 +189,13 @@ function TableFinder() {
             city: data.city || data.locality || "",
             region: data.principalSubdivision || "",
             country: data.countryName || "",
+            zip: data.postcode || "",
+            neighborhood: data.localityInfo?.administrative?.[3]?.name || data.localityInfo?.administrative?.[2]?.name || "",
             lat: latitude,
             lng: longitude,
           });
         } catch {
-          setUserLocation({ city: "", region: "", country: "", lat: latitude, lng: longitude });
+          setUserLocation({ city: "", region: "", country: "", zip: "", neighborhood: "", lat: latitude, lng: longitude });
         }
         setLocationLoading(false);
       },
@@ -283,7 +285,7 @@ function TableFinder() {
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               {userLocation?.city ? (
                 <span style={{ fontSize: 13, color: "#8A7E70", fontWeight: 500 }}>
-                  📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
+                  📍 {userLocation.neighborhood || userLocation.city}{userLocation.zip ? ` ${userLocation.zip}` : (userLocation.region ? `, ${userLocation.region}` : "")}
                 </span>
               ) : (
                 <button onClick={detectLocation} disabled={locationLoading}
@@ -372,7 +374,7 @@ function TableFinder() {
             </div>
             {userLocation?.city ? (
               <div style={{ fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
-                📍 {userLocation.city}{userLocation.region ? `, ${userLocation.region}` : ""}
+                📍 {userLocation.neighborhood || userLocation.city}{userLocation.zip ? ` ${userLocation.zip}` : (userLocation.region ? `, ${userLocation.region}` : "")}
               </div>
             ) : (
               <button onClick={detectLocation} disabled={locationLoading}
