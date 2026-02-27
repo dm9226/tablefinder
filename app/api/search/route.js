@@ -146,7 +146,7 @@ export async function POST(request) {
     }
 
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`,
       {
         method: "POST",
         headers: {
@@ -169,8 +169,8 @@ export async function POST(request) {
 
     if (!response.ok) {
       const err = await response.text();
-      console.error("Gemini API error:", err);
-      return Response.json({ error: "AI service error" }, { status: response.status });
+      console.error("Gemini API error:", response.status, err);
+      return Response.json({ error: `AI service error: ${response.status} - ${err.slice(0, 200)}` }, { status: response.status });
     }
 
     const data = await response.json();
