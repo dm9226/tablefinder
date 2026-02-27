@@ -1,10 +1,18 @@
-// TableFinder v2 - Direct API integration with OpenTable + Resy
-// No web search, no scraping - just calling the same APIs their websites use
+// TableFinder v2 - Fast restaurant search with direct booking links
+// One API call per platform, no per-venue lookups
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
+// Hard timeout wrapper
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
+}
+
 // ============================================================
-// STEP 1: Use Gemini to parse natural language into search params
+// STEP 1: Parse natural language into search params
 // ============================================================
 
 async function parseQuery(userMessage, location) {
@@ -27,46 +35,41 @@ Return ONLY a JSON object, no markdown, no explanation:
   "state": "2-letter state code or empty",
   "lat": latitude number or null,
   "lng": longitude number or null,
-  "query": "short search term for the restaurant search, e.g. 'mexican' or 'italian fine dining'"
+  "query": "short search term"
 }
 
 Rules:
 - "tonight" = today's date, time = 19:00 (or later if past 19:00)
 - "tomorrow" = tomorrow's date
 - "this Saturday" = next Saturday
-- If no cuisine specified, use empty string
-- CRITICAL: If the user does NOT mention a specific city, ALWAYS default city to "${location?.city || ""}" and state to "${location?.region || ""}" and lat to ${location?.lat || "null"} and lng to ${location?.lng || "null"}
-- Only use a different city if the user explicitly says something like "in Chicago" or "NYC restaurants"
+- CRITICAL: If the user does NOT mention a specific city, default to "${location?.city || ""}", state "${location?.region || ""}", lat ${location?.lat || "null"}, lng ${location?.lng || "null"}
 
 User message: "${userMessage}"`;
 
-  const res = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
-      }),
-    }
-  );
-
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error("Gemini API error:", res.status, errText.slice(0, 300));
-    // If Gemini fails, build params manually from what we know
-    return buildFallbackParams(userMessage, location, today, currentHour);
-  }
-
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  console.log("Gemini raw response:", text.slice(0, 500));
-  const clean = text.replace(/```json|```/g, "").trim();
-
   try {
+    const res = await withTimeout(
+      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
+        }),
+      }),
+      5000
+    );
+
+    if (!res.ok) {
+      console.error("Gemini error:", res.status);
+      return buildFallbackParams(userMessage, location, today, currentHour);
+    }
+
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const clean = text.replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(clean);
-    // ALWAYS override with detected location if user didn't specify a different city
+
+    // Force detected location if user didn't specify different city
     if (location?.lat) {
       if (!parsed.city || parsed.city.toLowerCase() === (location.city || "").toLowerCase()) {
         parsed.lat = location.lat;
@@ -75,56 +78,34 @@ User message: "${userMessage}"`;
         parsed.state = location.region || parsed.state;
       }
     }
-    if (!parsed.lat && location?.lat) {
-      parsed.lat = location.lat;
-      parsed.lng = location.lng;
-    }
-    if (!parsed.city && location?.city) {
-      parsed.city = location.city;
-    }
-    if (!parsed.state && location?.region) {
-      parsed.state = location.region;
-    }
-    console.log("Parsed query:", JSON.stringify(parsed));
+    if (!parsed.lat && location?.lat) { parsed.lat = location.lat; parsed.lng = location.lng; }
+    if (!parsed.city && location?.city) parsed.city = location.city;
+    if (!parsed.state && location?.region) parsed.state = location.region;
+
+    console.log("Parsed:", JSON.stringify(parsed));
     return parsed;
   } catch (e) {
-    console.error("Failed to parse Gemini response:", clean.slice(0, 300));
+    console.error("Parse error:", e.message);
     return buildFallbackParams(userMessage, location, today, currentHour);
   }
 }
 
-// Fallback: parse query without AI if Gemini is unavailable
 function buildFallbackParams(userMessage, location, today, currentHour) {
   const msg = userMessage.toLowerCase();
-
-  // Extract party size
   const partyMatch = msg.match(/(?:for|party of|group of)\s*(\d+)/);
   const party_size = partyMatch ? parseInt(partyMatch[1]) : 2;
 
-  // Extract date
   let date = today;
   if (msg.includes("tomorrow")) {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    date = d.toISOString().split("T")[0];
+    const d = new Date(); d.setDate(d.getDate() + 1); date = d.toISOString().split("T")[0];
   } else if (msg.includes("saturday")) {
-    const d = new Date();
-    const daysUntil = (6 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + daysUntil);
-    date = d.toISOString().split("T")[0];
+    const d = new Date(); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
   } else if (msg.includes("friday")) {
-    const d = new Date();
-    const daysUntil = (5 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + daysUntil);
-    date = d.toISOString().split("T")[0];
+    const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
   } else if (msg.includes("sunday")) {
-    const d = new Date();
-    const daysUntil = (0 - d.getDay() + 7) % 7 || 7;
-    d.setDate(d.getDate() + daysUntil);
-    date = d.toISOString().split("T")[0];
+    const d = new Date(); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
   }
 
-  // Extract time
   let time = currentHour >= 19 ? `${currentHour + 1}:00` : "19:00";
   const timeMatch = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
   if (timeMatch) {
@@ -135,337 +116,165 @@ function buildFallbackParams(userMessage, location, today, currentHour) {
     time = `${h.toString().padStart(2, "0")}:${m}`;
   }
 
-  // Extract cuisine (just use the main keywords)
-  const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "barbecue", "pizza", "vietnamese", "greek", "ethiopian", "spanish", "tapas"];
+  const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "pizza", "vietnamese", "greek", "spanish", "tapas"];
   const query = cuisines.find(c => msg.includes(c)) || msg.replace(/for \d+|tonight|tomorrow|saturday|friday|sunday|near me|in \w+/gi, "").trim().split(/\s+/).slice(0, 3).join(" ");
 
-  const params = {
-    cuisine: query,
-    date,
-    time,
-    party_size,
-    city: location?.city || "",
-    state: location?.region || "",
-    lat: location?.lat || null,
-    lng: location?.lng || null,
-    query,
+  return {
+    cuisine: query, date, time, party_size,
+    city: location?.city || "", state: location?.region || "",
+    lat: location?.lat || null, lng: location?.lng || null, query,
   };
-
-  console.log("Fallback parsed:", JSON.stringify(params));
-  return params;
 }
 
 // ============================================================
-// STEP 2: OpenTable API
+// STEP 2: OpenTable - single page fetch, no per-venue calls
 // ============================================================
 
 async function searchOpenTable(params) {
   try {
-    console.log("OpenTable: searching...", params.query, params.city, params.lat, params.lng);
-
-    const citySlug = (params.city || "atlanta").toLowerCase().replace(/\s+/g, "-");
+    const citySlug = (params.city || "atlanta").toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const dateTime = `${params.date}T${params.time}:00`;
     const term = params.query || params.cuisine || "";
 
-    // Use OpenTable's actual search URL format with city in path
-    const searchUrl = `https://www.opentable.com/s/${encodeURIComponent(citySlug)}-restaurant-reservations?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&term=${encodeURIComponent(term)}&latitude=${params.lat || ""}&longitude=${params.lng || ""}`;
+    const url = `https://www.opentable.com/s/${citySlug}-restaurant-reservations?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&term=${encodeURIComponent(term)}&latitude=${params.lat || ""}&longitude=${params.lng || ""}`;
+    console.log("OpenTable URL:", url);
 
-    console.log("OpenTable URL:", searchUrl);
+    const res = await withTimeout(
+      fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      }),
+      8000
+    );
 
-    const res = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-
-    console.log("OpenTable status:", res.status);
-
-    if (!res.ok) {
-      console.error("OpenTable search failed:", res.status);
-      return [];
-    }
+    if (!res.ok) { console.error("OpenTable:", res.status); return []; }
 
     const html = await res.text();
-    console.log("OpenTable HTML length:", html.length);
+    console.log("OpenTable: got", html.length, "bytes");
 
-    // OpenTable embeds search results as JSON in __NEXT_DATA__
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!nextDataMatch) {
-      console.log("OpenTable: No __NEXT_DATA__ found, trying JSON-LD...");
-      // Try extracting from JSON-LD or other embedded data
-      return parseOpenTableHTML(html, params);
-    }
+    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!match) { console.log("OpenTable: no __NEXT_DATA__"); return []; }
 
-    try {
-      const nextData = JSON.parse(nextDataMatch[1]);
-      console.log("OpenTable: Got __NEXT_DATA__, keys:", Object.keys(nextData?.props?.pageProps || {}).join(", "));
-      return parseOpenTableNextData(nextData, params);
-    } catch (e) {
-      console.error("OpenTable: Failed to parse __NEXT_DATA__:", e.message);
-      return [];
-    }
+    const nextData = JSON.parse(match[1]);
+    const pageProps = nextData?.props?.pageProps;
+    console.log("OpenTable pageProps keys:", Object.keys(pageProps || {}).join(", "));
+
+    const restaurants =
+      pageProps?.restaurants ||
+      pageProps?.searchResult?.restaurants ||
+      pageProps?.results?.restaurants ||
+      pageProps?.searchData?.restaurants ||
+      pageProps?.initialState?.restaurants ||
+      [];
+
+    console.log("OpenTable: found", restaurants.length, "restaurants");
+
+    return restaurants.slice(0, 10).map((r) => {
+      const rid = r.rid || r.restaurantId || r.id;
+      const slug = r.urls?.profileLink || r.profileLink || "";
+      const profileUrl = slug.startsWith("http") ? slug : slug ? `https://www.opentable.com${slug}` : "";
+
+      const hasAvailability = r.availability?.timeSlots?.length > 0 ||
+        r.timeslots?.length > 0 ||
+        r.slots?.length > 0 ||
+        r.hasAvailability === true;
+
+      const bookingUrl = rid
+        ? `https://www.opentable.com/restref/client/?rid=${rid}&dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&restref=true`
+        : `${profileUrl}?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}`;
+
+      return {
+        name: r.name || "",
+        cuisine: r.primaryCuisine?.name || r.cuisine || r.primaryCuisineType || "",
+        price: r.priceRange || r.priceBand || ("$".repeat(r.pricing?.priceRange || 0)) || "",
+        rating: r.statistics?.ratings?.overall?.rating || r.statistics?.ratings?.overall || r.rating?.overall || r.overallRating || r.rating || null,
+        reviewCount: r.statistics?.reviews?.count || r.reviewCount || null,
+        address: r.neighborhood || [r.location?.neighborhood, r.location?.city].filter(Boolean).join(", ") || r.address || "",
+        platform: "OpenTable",
+        hasAvailability,
+        bookingUrl,
+        profileUrl: profileUrl || bookingUrl,
+      };
+    }).filter(r => r.name);
   } catch (e) {
     console.error("OpenTable error:", e.message);
     return [];
   }
 }
 
-function parseOpenTableHTML(html, params) {
-  // Fallback: try to extract restaurant data from HTML if __NEXT_DATA__ isn't available
-  try {
-    const results = [];
-    // Look for restaurant cards with data attributes or structured data
-    const jsonLdMatches = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
-    for (const match of jsonLdMatches) {
-      try {
-        const json = JSON.parse(match.replace(/<script[^>]*>/, "").replace(/<\/script>/, ""));
-        if (json["@type"] === "Restaurant" || json["@type"] === "FoodEstablishment") {
-          results.push({
-            name: json.name || "",
-            cuisine: json.servesCuisine || "",
-            price: json.priceRange || "",
-            rating: json.aggregateRating?.ratingValue || null,
-            address: json.address?.streetAddress || json.address?.addressLocality || "",
-            platform: "OpenTable",
-            slots: [],
-            profileUrl: json.url || "",
-          });
-        }
-      } catch {}
-    }
-    return results;
-  } catch (e) {
-    console.error("OpenTable HTML parse error:", e.message);
-    return [];
-  }
-}
-
-function parseOpenTableResults(gqlData, params) {
-  try {
-    const restaurants = gqlData?.data?.availability?.restaurants || gqlData?.data?.restaurantsAvailability?.restaurants || [];
-    return restaurants.slice(0, 10).map((r) => {
-      const slots = (r.availability?.timeSlots || r.slots || []).map((slot) => ({
-        time: slot.dateTime || slot.time,
-        bookingUrl: slot.link || slot.bookingUrl || buildOpenTableBookingUrl(r, slot, params),
-      }));
-
-      return {
-        name: r.name,
-        cuisine: r.cuisine || r.primaryCuisine || "",
-        price: r.priceRange || r.priceBand || "",
-        rating: r.rating || r.overallRating || null,
-        address: r.neighborhood || r.address || "",
-        platform: "OpenTable",
-        slots: slots.filter((s) => s.time),
-        profileUrl: r.profileLink ? `https://www.opentable.com${r.profileLink}` : "",
-      };
-    });
-  } catch (e) {
-    console.error("OpenTable parse error:", e.message);
-    return [];
-  }
-}
-
-function parseOpenTableNextData(nextData, params) {
-  try {
-    // Navigate the Next.js data structure to find restaurant results
-    const pageProps = nextData?.props?.pageProps;
-    const restaurants =
-      pageProps?.restaurants ||
-      pageProps?.searchResult?.restaurants ||
-      pageProps?.results?.restaurants ||
-      [];
-
-    return restaurants.slice(0, 10).map((r) => {
-      const slots = (r.availability?.timeSlots || r.timeslots || r.slots || []).map((slot) => {
-        const dateTime = slot.dateTime || slot.date || `${params.date}T${slot.time || slot.timeString}`;
-        return {
-          time: dateTime,
-          bookingUrl:
-            slot.link ||
-            slot.url ||
-            `https://www.opentable.com/booking/seating-options?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&rid=${r.rid || r.restaurantId || r.id}`,
-        };
-      });
-
-      return {
-        name: r.name,
-        cuisine: r.primaryCuisine?.name || r.cuisine || "",
-        price: "$".repeat(r.priceBand || r.priceRange || 2),
-        rating: r.statistics?.ratings?.overall || r.rating || null,
-        address: [r.neighborhood, r.location?.city].filter(Boolean).join(", ") || r.address || "",
-        platform: "OpenTable",
-        slots: slots.filter((s) => s.time),
-        profileUrl: r.urls?.profileLink ? `https://www.opentable.com${r.urls.profileLink}` : "",
-      };
-    });
-  } catch (e) {
-    console.error("OpenTable NextData parse error:", e.message);
-    return [];
-  }
-}
-
-function buildOpenTableBookingUrl(restaurant, slot, params) {
-  const rid = restaurant.rid || restaurant.restaurantId || restaurant.id;
-  const dateTime = slot.dateTime || slot.time;
-  if (!rid || !dateTime) return "";
-  return `https://www.opentable.com/booking/seating-options?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&rid=${rid}`;
-}
-
 // ============================================================
-// STEP 3: Resy API
+// STEP 3: Resy - single search call, no per-venue calls
 // ============================================================
 
-// Resy's public API key (embedded in their frontend JS, same for all users)
 const RESY_API_KEY = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5";
 
 async function searchResy(params) {
   try {
-    console.log("Resy: searching...", params.query, params.city);
-
     const headers = {
       Authorization: `ResyAPI api_key="${RESY_API_KEY}"`,
       "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
       Origin: "https://resy.com",
       Referer: "https://resy.com/",
+      "Content-Type": "application/json",
     };
 
-    // Step 3a: Search for venues matching the query
-    const searchUrl = new URL("https://api.resy.com/3/venuesearch/search");
     const searchBody = {
-      geo: {
-        latitude: params.lat || 33.749,
-        longitude: params.lng || -84.388,
-      },
+      geo: { latitude: params.lat || 33.749, longitude: params.lng || -84.388 },
       location: params.city || "Atlanta",
       per_page: 10,
       query: params.query || params.cuisine || "",
-      slot_filter: {
-        day: params.date,
-        party_size: params.party_size,
-      },
+      slot_filter: { day: params.date, party_size: params.party_size },
       types: ["venue"],
     };
 
-    console.log("Resy search body:", JSON.stringify({ geo: searchBody.geo, location: searchBody.location, query: searchBody.query }));
+    console.log("Resy: searching", params.query, "in", params.city, "at", params.lat, params.lng);
 
-    const searchRes = await fetch(searchUrl.toString(), {
-      method: "POST",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify(searchBody),
-    });
-
-    console.log("Resy search status:", searchRes.status);
-
-    if (!searchRes.ok) {
-      const errText = await searchRes.text();
-      console.error("Resy search error:", errText.slice(0, 200));
-
-      // Fallback: try the simpler venue search
-      return await searchResyFallback(params, headers);
-    }
-
-    const searchData = await searchRes.json();
-    const venues = searchData?.search?.hits || [];
-
-    console.log(`Resy: found ${venues.length} venues`);
-
-    // Step 3b: For each venue, get availability
-    const results = await Promise.all(
-      venues.slice(0, 8).map(async (venue) => {
-        try {
-          const venueId = venue.id?.resy || venue.objectID;
-          if (!venueId) return null;
-
-          const findUrl = `https://api.resy.com/4/find?lat=${params.lat || 0}&long=${params.lng || 0}&day=${params.date}&party_size=${params.party_size}&venue_id=${venueId}`;
-
-          const findRes = await fetch(findUrl, { headers });
-
-          if (!findRes.ok) return null;
-
-          const findData = await findRes.json();
-          const venueResult = findData?.results?.venues?.[0];
-
-          if (!venueResult || !venueResult.slots?.length) return null;
-
-          const slots = venueResult.slots.map((slot) => {
-            const startTime = slot.date?.start;
-            const configId = slot.config?.id;
-            // Deep link directly into Resy's booking flow
-            const bookingUrl = `https://resy.com/cities/${params.city?.toLowerCase() || "new-york"}/${venue.url_slug || venue.name?.toLowerCase().replace(/\s+/g, "-")}?date=${params.date}&seats=${params.party_size}`;
-
-            return {
-              time: startTime,
-              type: slot.config?.type || "Dining Room",
-              bookingUrl,
-              configId,
-            };
-          });
-
-          return {
-            name: venue.name || venueResult.venue?.name,
-            cuisine: venue.cuisine?.[0] || venue.type || "",
-            price: "$".repeat(venue.price_range || 2),
-            rating: venue.rating || venueResult.venue?.rating || null,
-            address: venue.location?.neighborhood || venue.neighborhood || "",
-            platform: "Resy",
-            slots: slots.filter((s) => s.time),
-            profileUrl: `https://resy.com/cities/${params.city?.toLowerCase() || "new-york"}/${venue.url_slug || ""}`,
-          };
-        } catch (e) {
-          console.error("Resy venue error:", e.message);
-          return null;
-        }
-      })
+    const res = await withTimeout(
+      fetch("https://api.resy.com/3/venuesearch/search", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(searchBody),
+      }),
+      8000
     );
 
-    return results.filter(Boolean);
+    if (!res.ok) { console.error("Resy:", res.status); return []; }
+
+    const data = await res.json();
+    const venues = data?.search?.hits || [];
+    console.log("Resy: found", venues.length, "venues");
+
+    const citySlug = (params.city || "atlanta").toLowerCase().replace(/\s+/g, "-");
+
+    return venues.slice(0, 10).map((venue) => {
+      const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const bookingUrl = `https://resy.com/cities/${citySlug}/${slug}?date=${params.date}&seats=${params.party_size}`;
+
+      const hasAvailability = venue.availability?.length > 0 ||
+        venue.num_slots > 0 ||
+        venue.available === true ||
+        venue.notify_available !== true;
+
+      return {
+        name: venue.name || "",
+        cuisine: Array.isArray(venue.cuisine) ? venue.cuisine[0] : (venue.cuisine || venue.type || ""),
+        price: "$".repeat(venue.price_range || venue.price || 2),
+        rating: venue.rating || venue.score || null,
+        reviewCount: venue.num_ratings || null,
+        address: venue.location?.neighborhood || venue.neighborhood || venue.region || "",
+        platform: "Resy",
+        hasAvailability,
+        bookingUrl,
+        profileUrl: bookingUrl,
+      };
+    }).filter(r => r.name);
   } catch (e) {
     console.error("Resy error:", e.message);
     return [];
   }
-}
-
-async function searchResyFallback(params, headers) {
-  try {
-    // Simpler search endpoint
-    const query = encodeURIComponent(params.query || params.cuisine || "restaurant");
-    const url = `https://api.resy.com/3/venue?url_slug=${query}&location=${encodeURIComponent(params.city || "atlanta")}`;
-
-    const res = await fetch(url, { headers });
-    if (!res.ok) return [];
-
-    // This endpoint returns a single venue - not ideal for search
-    // Try the location-based search instead
-    const locationUrl = `https://api.resy.com/4/find?lat=${params.lat || 0}&long=${params.lng || 0}&day=${params.date}&party_size=${params.party_size}&venue_id=0`;
-    console.log("Resy fallback: trying location-based search");
-
-    return [];
-  } catch (e) {
-    console.error("Resy fallback error:", e.message);
-    return [];
-  }
-}
-
-// ============================================================
-// STEP 4: Format results with Gemini for nice presentation
-// ============================================================
-
-async function formatResults(results, userMessage, params) {
-  if (!results.length) {
-    return `I searched OpenTable and Resy for "${params.query || params.cuisine}" in ${params.city || "your area"} on ${params.date} for ${params.party_size} people, but didn't find available tables matching your criteria. Try adjusting your date, time, or party size.`;
-  }
-
-  // Return structured data - the frontend will render it nicely
-  return JSON.stringify({
-    type: "results",
-    searchParams: params,
-    restaurants: results,
-    resultCount: results.length,
-    platformsSearched: ["OpenTable", "Resy"],
-  });
 }
 
 // ============================================================
@@ -474,18 +283,15 @@ async function formatResults(results, userMessage, params) {
 
 const rateLimit = new Map();
 const cache = new Map();
-const RATE_LIMIT = 30;
-const RATE_WINDOW = 3600000;
-const CACHE_TTL = 600000; // 10 minutes
 
 function checkRateLimit(ip) {
   const now = Date.now();
   const entry = rateLimit.get(ip);
-  if (!entry || now - entry.start > RATE_WINDOW) {
+  if (!entry || now - entry.start > 3600000) {
     rateLimit.set(ip, { count: 1, start: now });
     return true;
   }
-  if (entry.count >= RATE_LIMIT) return false;
+  if (entry.count >= 30) return false;
   entry.count++;
   return true;
 }
@@ -500,11 +306,9 @@ function getCacheKey(params) {
 
 export async function POST(req) {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-
   if (!checkRateLimit(ip)) {
     return Response.json({ error: "Rate limit reached. Try again shortly." }, { status: 429 });
   }
-
   if (!GEMINI_KEY) {
     return Response.json({ error: "API key not configured" }, { status: 500 });
   }
@@ -512,73 +316,68 @@ export async function POST(req) {
   try {
     const { messages, location } = await req.json();
     const lastMessage = messages?.filter((m) => m.role === "user").pop()?.content || "";
-
     if (!lastMessage) {
       return Response.json({ error: "No message provided" }, { status: 400 });
     }
 
-    // Step 1: Parse the query
     const params = await parseQuery(lastMessage, location);
 
     // Check cache
     const cacheKey = getCacheKey(params);
     const cached = cache.get(cacheKey);
-    if (cached && Date.now() - cached.time < CACHE_TTL) {
-      console.log("Cache hit:", cacheKey);
-      return Response.json({
-        reply: cached.reply,
-        structured: cached.structured,
-        cached: true,
-        searchParams: params,
-      });
+    if (cached && Date.now() - cached.time < 600000) {
+      return Response.json({ ...cached.data, cached: true });
     }
 
-    // Step 2: Search platforms in parallel
-    console.log("Searching platforms for:", JSON.stringify(params));
+    // Search both platforms in parallel
+    console.log("Searching:", JSON.stringify(params));
+    const startTime = Date.now();
 
     const [openTableResults, resyResults] = await Promise.all([
-      searchOpenTable(params),
-      searchResy(params),
+      searchOpenTable(params).catch(e => { console.error("OT fail:", e.message); return []; }),
+      searchResy(params).catch(e => { console.error("Resy fail:", e.message); return []; }),
     ]);
 
-    console.log(`Results: OpenTable=${openTableResults.length}, Resy=${resyResults.length}`);
+    const elapsed = Date.now() - startTime;
+    console.log(`Done in ${elapsed}ms: OT=${openTableResults.length}, Resy=${resyResults.length}`);
 
-    // Merge results
+    // Merge - availability confirmed first
     const allResults = [...openTableResults, ...resyResults];
+    allResults.sort((a, b) => {
+      if (a.hasAvailability && !b.hasAvailability) return -1;
+      if (!a.hasAvailability && b.hasAvailability) return 1;
+      return 0;
+    });
 
-    // Sort: restaurants with more available slots first
-    allResults.sort((a, b) => (b.slots?.length || 0) - (a.slots?.length || 0));
-
-    // Build structured response
     const structured = {
       type: "results",
       searchParams: params,
       restaurants: allResults,
       resultCount: allResults.length,
       platformsSearched: ["OpenTable", "Resy"],
+      elapsed,
     };
 
-    // Build text summary
     let reply;
     if (allResults.length === 0) {
-      reply = `I searched OpenTable and Resy for ${params.query || params.cuisine || "restaurants"} in ${params.city || "your area"} on ${params.date} at ${params.time} for ${params.party_size} — but didn't find available tables. Try a different date, time, or cuisine.`;
+      reply = `No restaurants found for ${params.query || "your search"} in ${params.city || "your area"} on ${params.date}. Try a different cuisine, date, or location.`;
     } else {
-      const withSlots = allResults.filter((r) => r.slots?.length > 0);
-      reply = `Found ${allResults.length} restaurants with ${withSlots.reduce((sum, r) => sum + r.slots.length, 0)} available time slots across OpenTable and Resy.`;
+      const available = allResults.filter(r => r.hasAvailability).length;
+      reply = `Found ${allResults.length} restaurants${available > 0 ? ` (${available} with confirmed availability)` : ""} in ${params.city || "your area"}.`;
     }
 
-    // Cache the result
-    cache.set(cacheKey, { reply, structured, time: Date.now() });
+    const responseData = { reply, structured, searchParams: params };
 
-    // Evict old cache entries
+    // Cache
+    cache.set(cacheKey, { data: responseData, time: Date.now() });
     if (cache.size > 200) {
       const oldest = [...cache.entries()].sort((a, b) => a[1].time - b[1].time);
       for (let i = 0; i < 50; i++) cache.delete(oldest[i][0]);
     }
 
-    return Response.json({ reply, structured, cached: false, searchParams: params });
+    return Response.json(responseData);
   } catch (e) {
-    console.error("Search handler error:", e);
+    console.error("Handler error:", e);
     return Response.json({ error: `Search failed: ${e.message}` }, { status: 500 });
   }
 }
