@@ -1,522 +1,465 @@
-"use client";
-import { useState, useRef, useEffect, Component } from "react";
+// TableFinder v2 - Resy + Yelp direct API integration
+// Fast: one call per platform, parallel execution, hard timeouts
 
-// Error boundary to catch render crashes
-class ErrorBoundary extends Component {
-  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
-  static getDerivedStateFromError(error) { return { hasError: true, error }; }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", flexDirection: "column", gap: 16, padding: 40 }}>
-          <h2>Something went wrong</h2>
-          <p style={{ color: "#8A7E70", maxWidth: 400, textAlign: "center" }}>{this.state.error?.message || "Unknown error"}</p>
-          <button onClick={() => window.location.reload()} style={{ padding: "10px 20px", background: "#E8A86D", color: "#1A1612", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}>Reload</button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const YELP_API_KEY = process.env.YELP_API_KEY;
+const RESY_API_KEY = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5";
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
+  ]);
 }
 
-export default function TableFinderWrapper() {
-  return <ErrorBoundary><TableFinder /></ErrorBoundary>;
-}
+// ============================================================
+// STEP 1: Parse natural language → search params
+// ============================================================
 
-// Safely convert any value to a displayable string
-function safe(val) {
-  if (val == null) return "";
-  if (typeof val === "string") return val;
-  if (typeof val === "number") return String(val);
-  if (typeof val === "object") {
-    return val.name || val.label || val.text || val.average || val.value || JSON.stringify(val);
-  }
-  return String(val);
-}
+async function parseQuery(userMessage, location) {
+  const today = new Date().toISOString().split("T")[0];
+  const now = new Date();
+  const currentHour = now.getHours();
 
-function formatTime(dateTimeStr) {
-  if (!dateTimeStr) return "";
+  const prompt = `You are a query parser. Extract restaurant search parameters.
+Today: ${today}. Current hour: ${currentHour}.
+${location?.city ? `User location: ${location.city}, ${location.region || ""}` : ""}
+${location?.lat ? `Coordinates: ${location.lat}, ${location.lng}` : ""}
+
+Return ONLY valid JSON, no markdown:
+{"cuisine":"","date":"YYYY-MM-DD","time":"HH:MM","party_size":2,"city":"","state":"","lat":null,"lng":null,"query":""}
+
+Rules:
+- "tonight" = today, time 19:00 (or current hour + 1 if after 19:00, max 21:00)
+- "tomorrow" = tomorrow
+- Default time 19:00, default party 2
+- query = short cuisine/food keyword like "mexican", "sushi", "steakhouse". Empty string if none specified.
+- If user says generic things like "table for 2" or "dinner tonight", query should be empty string
+- CRITICAL: Default city="${location?.city || ""}", state="${location?.region || ""}", lat=${location?.lat || "null"}, lng=${location?.lng || "null"} unless user names a different city
+
+User: "${userMessage}"`;
+
   try {
-    const d = new Date(dateTimeStr);
-    if (isNaN(d.getTime())) {
-      // Try parsing "HH:MM" format
-      const parts = dateTimeStr.match(/(\d{1,2}):(\d{2})/);
-      if (parts) {
-        const h = parseInt(parts[1]);
-        const m = parts[2];
-        const ampm = h >= 12 ? "PM" : "AM";
-        const h12 = h > 12 ? h - 12 : h === 0 ? 12 : h;
-        return `${h12}:${m} ${ampm}`;
-      }
-      return dateTimeStr;
-    }
-    return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
-  } catch {
-    return dateTimeStr;
-  }
-}
-
-function PlatformBadge({ platform }) {
-  const colors = {
-    OpenTable: { bg: "rgba(218,55,67,0.12)", text: "#DA3743", border: "rgba(218,55,67,0.25)" },
-    Resy: { bg: "rgba(0,100,255,0.08)", text: "#4A90D9", border: "rgba(0,100,255,0.2)" },
-  };
-  const c = colors[platform] || { bg: "rgba(255,255,255,0.05)", text: "#aaa", border: "rgba(255,255,255,0.1)" };
-  return (
-    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.2, color: c.text, background: c.bg, border: `1px solid ${c.border}`, padding: "3px 8px", borderRadius: 4 }}>
-      {platform}
-    </span>
-  );
-}
-
-function BookingButton({ restaurant }) {
-  const isOpenTable = restaurant.platform === "OpenTable";
-  const bgColor = isOpenTable ? "rgba(218,55,67,0.12)" : "rgba(72,128,255,0.12)";
-  const borderColor = isOpenTable ? "rgba(218,55,67,0.35)" : "rgba(72,128,255,0.35)";
-  const textColor = isOpenTable ? "#DA3743" : "#4880FF";
-  const hoverBg = isOpenTable ? "rgba(218,55,67,0.22)" : "rgba(72,128,255,0.22)";
-  const label = isOpenTable ? "Reserve on OpenTable →" : "Reserve on Resy →";
-
-  return (
-    <a
-      href={restaurant.bookingUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 8, color: textColor, fontSize: 13, fontWeight: 600, fontFamily: "'Outfit', sans-serif", textDecoration: "none", cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap" }}
-      onMouseEnter={(e) => { e.target.style.background = hoverBg; }}
-      onMouseLeave={(e) => { e.target.style.background = bgColor; }}
-    >
-      {label}
-    </a>
-  );
-}
-
-function RestaurantCard({ restaurant }) {
-  const ratingVal = typeof restaurant.rating === "object"
-    ? restaurant.rating?.average || restaurant.rating?.overall
-    : Number(restaurant.rating);
-  const showRating = ratingVal > 0;
-
-  // Fallback link card — just a link to search on the platform
-  if (restaurant.isFallbackLink) {
-    return (
-      <a
-        href={restaurant.bookingUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{ display: "block", background: "rgba(255,255,255,0.02)", border: "1px dashed rgba(255,255,255,0.1)", borderRadius: 12, padding: "16px 24px", marginBottom: 12, textDecoration: "none", transition: "all 0.2s" }}
-        onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(232,168,109,0.4)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <div style={{ fontSize: 15, color: "#E8A86D", fontWeight: 500, fontFamily: "'Outfit', sans-serif" }}>{restaurant.name}</div>
-            <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>{safe(restaurant.address)}</div>
-          </div>
-          <PlatformBadge platform={restaurant.platform} />
-        </div>
-      </a>
-    );
-  }
-
-  return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h3 style={{ margin: 0, fontSize: 18, fontFamily: "'Playfair Display', Georgia, serif", color: "#F0E6D8", fontWeight: 500 }}>
-            {restaurant.profileUrl ? (
-              <a href={restaurant.profileUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#F0E6D8", textDecoration: "none" }}>
-                {restaurant.name}
-              </a>
-            ) : (
-              restaurant.name
-            )}
-          </h3>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
-            {restaurant.cuisine && <span>{safe(restaurant.cuisine)}</span>}
-            {restaurant.price && <span>{safe(restaurant.price)}</span>}
-            {showRating && <span>★ {ratingVal}{restaurant.reviewCount ? ` (${safe(restaurant.reviewCount)})` : ""}</span>}
-          </div>
-          {restaurant.address && (
-            <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>
-              {safe(restaurant.address)}
-            </div>
-          )}
-        </div>
-        <PlatformBadge platform={restaurant.platform} />
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
-        {restaurant.bookingUrl && <BookingButton restaurant={restaurant} />}
-        {restaurant.hasAvailability && (
-          <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SearchSummary({ structured }) {
-  if (!structured?.searchParams) return null;
-  const p = structured.searchParams;
-  const available = structured.restaurants?.filter((r) => r.hasAvailability).length || 0;
-
-  return (
-    <div style={{ background: "rgba(232,168,109,0.05)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#C4B8A8" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
-        <span>
-          <strong style={{ color: "#E8A86D" }}>{structured.resultCount}</strong> restaurants
-        </span>
-        {available > 0 && (
-          <span>
-            <strong style={{ color: "#6BBF6B" }}>{available}</strong> with availability
-          </span>
-        )}
-        <span style={{ opacity: 0.6 }}>|</span>
-        <span>{safe(p.query || p.cuisine) || "All cuisines"}</span>
-        <span>{safe(p.city)}</span>
-        <span>{safe(p.date)} at {safe(p.time)}</span>
-        <span>Party of {safe(p.party_size)}</span>
-        {structured.elapsed && (
-          <span style={{ opacity: 0.4, fontSize: 11 }}>{(structured.elapsed / 1000).toFixed(1)}s</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ============================================================
-// MAIN APP
-// ============================================================
-
-function TableFinder() {
-  const [view, setView] = useState("landing");
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [userLocation, setUserLocation] = useState(null);
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [locationError, setLocationError] = useState(false);
-  const chatEndRef = useRef(null);
-  const inputRef = useRef(null);
-
-  const detectLocation = () => {
-    if (!navigator.geolocation) { setLocationError(true); return; }
-    setLocationLoading(true);
-    setLocationError(false);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const { latitude, longitude } = pos.coords;
-        try {
-          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
-          const data = await res.json();
-          setUserLocation({
-            city: data.city || data.locality || "",
-            region: data.principalSubdivision || "",
-            country: data.countryName || "",
-            zip: data.postcode || "",
-            neighborhood: data.localityInfo?.administrative?.[3]?.name || data.localityInfo?.administrative?.[2]?.name || "",
-            lat: latitude,
-            lng: longitude,
-          });
-        } catch {
-          setUserLocation({ city: "", region: "", country: "", zip: "", neighborhood: "", lat: latitude, lng: longitude });
-        }
-        setLocationLoading(false);
-      },
-      (err) => {
-        console.error("Geolocation error:", err.code, err.message);
-        setLocationError(true);
-        setLocationLoading(false);
-      },
-      { timeout: 10000 }
-    );
-  };
-
-  useEffect(() => { detectLocation(); }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const send = async (overrideText) => {
-    const text = (overrideText || input).trim();
-    if (!text || loading) return;
-    setInput("");
-    setLoading(true);
-
-    const userMsg = { role: "user", content: text };
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      const apiMessages = [...messages, userMsg].map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
-
-      const res = await fetch("/api/search", {
+    const res = await withTimeout(
+      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: apiMessages, location: userLocation }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Request failed" }));
-        throw new Error(err.error || `HTTP ${res.status}`);
-      }
-
-      const data = await res.json();
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.reply || "No results found.",
-          structured: data.structured || null,
-          cached: data.cached || false,
-          searchParams: data.searchParams || null,
-        },
-      ]);
-    } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Something went wrong: ${e.message}. Please try again.` },
-      ]);
-    }
-
-    setLoading(false);
-  };
-
-  // ============================================================
-  // LANDING PAGE
-  // ============================================================
-
-  if (view === "landing") {
-    return (
-      <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
-        <style>{`
-          @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap");
-          * { box-sizing: border-box; margin: 0; padding: 0; }
-          body { background: #1A1612; }
-          .cta-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
-        `}</style>
-
-        <nav style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-          <div style={{ maxWidth: 1000, margin: "0 auto", padding: "14px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span style={{ fontSize: 24, color: "#E8A86D" }}>&#9673;</span>
-              <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 20, color: "#F0E6D8", fontWeight: 500 }}>TableFinder</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              {userLocation?.city ? (
-                <span style={{ fontSize: 13, color: "#8A7E70", fontWeight: 500 }}>
-                  📍 {userLocation.neighborhood || userLocation.city}{userLocation.zip ? ` ${userLocation.zip}` : (userLocation.region ? `, ${userLocation.region}` : "")}
-                </span>
-              ) : (
-                <button onClick={detectLocation} disabled={locationLoading}
-                  style={{ fontSize: 13, color: "#E8A86D", fontWeight: 500, background: "none", border: "1px solid rgba(232,168,109,0.25)", borderRadius: 20, padding: "5px 12px", cursor: "pointer", fontFamily: "'Outfit', sans-serif" }}>
-                  {locationLoading ? "Detecting..." : locationError ? "📍 Enable location" : "📍 Detect my location"}
-                </button>
-              )}
-              <button onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }} className="cta-btn"
-                style={{ background: "#E8A86D", color: "#1A1612", border: "none", padding: "9px 20px", borderRadius: 8, fontSize: 14, fontFamily: "'Outfit', sans-serif", fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}>
-                Find a Table →
-              </button>
-            </div>
-          </div>
-        </nav>
-
-        {/* Hero */}
-        <div style={{ maxWidth: 700, margin: "0 auto", padding: "100px 24px 60px", textAlign: "center" }}>
-          <h1 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: "clamp(36px, 6vw, 56px)", fontWeight: 400, lineHeight: 1.15, color: "#F0E6D8", marginBottom: 20 }}>
-            Every table.<br />One search.
-          </h1>
-          <p style={{ fontSize: 18, color: "#8A7E70", maxWidth: 480, margin: "0 auto 40px", lineHeight: 1.6 }}>
-            Search OpenTable and Resy simultaneously. Real restaurants, real availability, direct booking links.
-          </p>
-
-          {/* Search bar */}
-          <div onClick={() => { setView("agent"); setTimeout(() => inputRef.current?.focus(), 100); }}
-            style={{ maxWidth: 520, margin: "0 auto", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: "14px 20px", cursor: "text", display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 20, opacity: 0.4 }}>🔍</span>
-            <span style={{ color: "#6A5E50", fontSize: 15 }}>
-              {userLocation?.city ? `Italian for 2, tonight in ${userLocation.city}...` : "Italian for 2, tonight in Atlanta..."}
-            </span>
-          </div>
-        </div>
-
-        {/* How it works */}
-        <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px 80px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 24 }}>
-            {[
-              { step: "01", title: "Describe", desc: "Tell us what you want. Cuisine, date, party size, location." },
-              { step: "02", title: "Discover", desc: "We search OpenTable and Resy simultaneously for real availability." },
-              { step: "03", title: "Book", desc: "Click to reserve directly on OpenTable or Resy. No middleman." },
-            ].map((item) => (
-              <div key={item.step} style={{ padding: 20, background: "rgba(255,255,255,0.02)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
-                <div style={{ fontSize: 11, color: "#E8A86D", fontWeight: 600, letterSpacing: 2, marginBottom: 8 }}>{item.step}</div>
-                <div style={{ fontSize: 16, fontWeight: 500, color: "#F0E6D8", marginBottom: 6 }}>{item.title}</div>
-                <div style={{ fontSize: 13, color: "#8A7E70", lineHeight: 1.5 }}>{item.desc}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <footer style={{ textAlign: "center", padding: "20px 24px", fontSize: 11, color: "rgba(255,255,255,0.15)" }}>
-          Real availability from OpenTable & Resy · tablefinder.ai
-        </footer>
-      </div>
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+        }),
+      }),
+      5000
     );
+
+    if (!res.ok) throw new Error(`Gemini ${res.status}`);
+
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    console.log("Gemini raw:", text.slice(0, 200));
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+
+    // Override with GPS if user didn't name a different city
+    if (location?.lat && (!parsed.city || parsed.city.toLowerCase() === (location.city || "").toLowerCase())) {
+      parsed.lat = location.lat;
+      parsed.lng = location.lng;
+      parsed.city = location.city || parsed.city;
+      parsed.state = location.region || parsed.state;
+    }
+    if (!parsed.lat && location?.lat) { parsed.lat = location.lat; parsed.lng = location.lng; }
+    if (!parsed.city && location?.city) parsed.city = location.city;
+
+    return sanitize(parsed);
+  } catch (e) {
+    console.error("Parse error:", e.message);
+    return sanitize(buildFallback(userMessage, location, today, currentHour));
+  }
+}
+
+function buildFallback(msg, location, today, currentHour) {
+  msg = msg.toLowerCase();
+  const partyMatch = msg.match(/(?:for|party of|group of)\s*(\d+)/);
+  const party_size = partyMatch ? parseInt(partyMatch[1]) : 2;
+
+  let date = today;
+  if (msg.includes("tomorrow")) {
+    const d = new Date(); d.setDate(d.getDate() + 1); date = d.toISOString().split("T")[0];
+  } else if (msg.includes("saturday")) {
+    const d = new Date(); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
+  } else if (msg.includes("friday")) {
+    const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
+  } else if (msg.includes("sunday")) {
+    const d = new Date(); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
   }
 
-  // ============================================================
-  // AGENT / SEARCH VIEW
-  // ============================================================
+  let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
+  const timeMatch = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
+  if (timeMatch) {
+    let h = parseInt(timeMatch[1]);
+    const m = timeMatch[2] || "00";
+    if (timeMatch[3].toLowerCase() === "pm" && h < 12) h += 12;
+    if (timeMatch[3].toLowerCase() === "am" && h === 12) h = 0;
+    time = `${h.toString().padStart(2, "0")}:${m}`;
+  }
 
-  return (
-    <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
-      <style>{`
-        @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap");
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #1A1612; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        .result-card { animation: fadeIn 0.3s ease-out; }
-      `}</style>
+  const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "pizza", "vietnamese", "greek", "spanish", "tapas", "ethiopian"];
+  const query = cuisines.find(c => msg.includes(c)) || "";
 
-      {/* Header */}
-      <header style={{ position: "sticky", top: 0, background: "rgba(26,22,18,0.95)", backdropFilter: "blur(12px)", zIndex: 10, borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-        <div style={{ maxWidth: 780, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button onClick={() => setView("landing")} style={{ background: "none", border: "none", color: "#C4B8A8", cursor: "pointer", fontSize: 18, padding: 4 }}>←</button>
-            <span style={{ fontSize: 18, color: "#E8A86D" }}>&#9673;</span>
-            <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 18, color: "#F0E6D8", fontWeight: 400 }}>TableFinder</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, background: loading ? "rgba(232,168,109,0.1)" : "rgba(100,200,100,0.08)", padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 500, color: loading ? "#E8A86D" : "#7BC47F" }}>
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: loading ? "#E8A86D" : "#7BC47F", animation: loading ? "pulse 1.2s infinite" : "none" }} />
-              {loading ? "Searching" : "Ready"}
-            </div>
-            {userLocation?.city ? (
-              <div style={{ fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>
-                📍 {userLocation.neighborhood || userLocation.city}{userLocation.zip ? ` ${userLocation.zip}` : (userLocation.region ? `, ${userLocation.region}` : "")}
-              </div>
-            ) : (
-              <button onClick={detectLocation} disabled={locationLoading}
-                style={{ fontSize: 11, color: "#E8A86D", fontWeight: 500, background: "none", border: "1px solid rgba(232,168,109,0.25)", borderRadius: 16, padding: "4px 10px", cursor: "pointer", fontFamily: "'Outfit', sans-serif" }}>
-                {locationLoading ? "..." : "📍 Detect"}
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
+  return {
+    cuisine: query, date, time, party_size,
+    city: location?.city || "", state: location?.region || "",
+    lat: location?.lat || null, lng: location?.lng || null, query,
+  };
+}
 
-      {/* Chat area */}
-      <main style={{ maxWidth: 780, margin: "0 auto", padding: "20px 20px 170px", minHeight: "calc(100vh - 56px)" }}>
-        {messages.length === 0 && (
-          <div style={{ textAlign: "center", padding: "80px 20px" }}>
-            <div style={{ fontSize: 48, marginBottom: 16, color: "#E8A86D" }}>&#9673;</div>
-            <h2 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 24, fontWeight: 400, marginBottom: 8 }}>What are you in the mood for?</h2>
-            <p style={{ color: "#8A7E70", fontSize: 15 }}>Search across OpenTable & Resy with real-time availability</p>
+function sanitize(p) {
+  // Fix time
+  const tm = (p.time || "19:00").match(/^(\d{1,2}):(\d{2})$/);
+  if (tm) {
+    let h = Math.min(23, Math.max(0, parseInt(tm[1])));
+    p.time = `${h.toString().padStart(2, "0")}:${tm[2]}`;
+  } else {
+    p.time = "19:00";
+  }
 
-            {/* Quick suggestions */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 24 }}>
-              {[
-                "Mexican for 2 tonight",
-                "Italian fine dining Saturday",
-                "Sushi this Friday, 4 people",
-                "Brunch Sunday for 6",
-              ].map((suggestion) => (
-                <button
-                  key={suggestion}
-                  onClick={() => { send(suggestion); }}
-                  style={{ padding: "8px 16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, color: "#C4B8A8", fontSize: 13, cursor: "pointer", fontFamily: "'Outfit', sans-serif", transition: "all 0.2s" }}
-                  onMouseEnter={(e) => { e.target.style.borderColor = "rgba(232,168,109,0.3)"; e.target.style.color = "#E8A86D"; }}
-                  onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.08)"; e.target.style.color = "#C4B8A8"; }}
-                >
-                  {suggestion}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+  // Strip junk queries
+  const junk = ["table", "restaurant", "restaurants", "food", "dinner", "lunch", "reservation", "book", "find", "me", "please", "get", "want", "need", "a", "the"];
+  if (p.query && junk.includes(p.query.toLowerCase().trim())) p.query = "";
+  if (p.cuisine && junk.includes(p.cuisine.toLowerCase().trim())) p.cuisine = "";
 
-        {messages.map((msg, i) => (
-          <div key={i} style={{ marginBottom: 16 }}>
-            {msg.role === "user" ? (
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <div style={{ background: "#E8A86D", color: "#1A1612", padding: "10px 18px", borderRadius: "16px 16px 4px 16px", maxWidth: "75%", fontSize: 15, fontWeight: 500 }}>
-                  {msg.content}
-                </div>
-              </div>
-            ) : (
-              <div className="result-card">
-                {/* Cached badge */}
-                {msg.cached && (
-                  <div style={{ fontSize: 11, color: "#7BC47F", marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
-                    ⚡ cached results
-                  </div>
-                )}
+  p.party_size = Math.max(1, Math.min(20, parseInt(p.party_size) || 2));
 
-                {/* Structured results */}
-                {msg.structured?.restaurants?.length > 0 ? (
-                  <div>
-                    <SearchSummary structured={msg.structured} />
-                    {msg.structured.restaurants.map((restaurant, j) => (
-                      <RestaurantCard key={j} restaurant={restaurant} />
-                    ))}
-                  </div>
-                ) : (
-                  /* Text-only response */
-                  <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", padding: "14px 20px", borderRadius: "16px 16px 16px 4px", maxWidth: "90%", fontSize: 15, lineHeight: 1.6, color: "#C4B8A8" }}>
-                    {msg.content}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
+  console.log("Final params:", JSON.stringify(p));
+  return p;
+}
 
-        {loading && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0", color: "#8A7E70", fontSize: 14 }}>
-            <div style={{ display: "flex", gap: 4 }}>
-              {[0, 1, 2].map((i) => (
-                <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: `pulse 1.2s infinite ${i * 0.2}s` }} />
-              ))}
-            </div>
-            Searching OpenTable & Resy...
-          </div>
-        )}
+// ============================================================
+// STEP 2: Resy — try multiple endpoints until one works
+// ============================================================
 
-        <div ref={chatEndRef} />
-      </main>
+async function searchResy(params) {
+  const headers = {
+    Authorization: `ResyAPI api_key="${RESY_API_KEY}"`,
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    Origin: "https://resy.com",
+    Referer: "https://resy.com/",
+  };
+  const citySlug = (params.city || "atlanta").toLowerCase().replace(/\s+/g, "-");
 
-      {/* Input bar */}
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent, #1A1612 30%)", padding: "40px 20px 20px" }}>
-        <div style={{ maxWidth: 780, margin: "0 auto" }}>
-          <div style={{ display: "flex", gap: 10, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "6px 6px 6px 18px", alignItems: "center" }}>
-            <input
-              ref={inputRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder={userLocation?.city ? `Sushi for 4, this Saturday, ${userLocation.city}...` : "Sushi for 4, this Saturday, downtown..."}
-              disabled={loading}
-              style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }}
-            />
-            <button
-              onClick={send}
-              disabled={loading || !input.trim()}
-              style={{ background: input.trim() ? "#E8A86D" : "rgba(232,168,109,0.2)", color: "#1A1612", border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 16, cursor: input.trim() ? "pointer" : "default", transition: "all 0.2s", fontWeight: 600 }}
-            >
-              ↑
-            </button>
-          </div>
-          <p style={{ textAlign: "center", fontSize: 11, color: "rgba(255,255,255,0.15)", marginTop: 8 }}>
-            Real availability from OpenTable & Resy · tablefinder.ai
-          </p>
-        </div>
-      </div>
-    </div>
-  );
+  // ---- Approach 1: GET /4/find (simplest, no POST body to get wrong) ----
+  try {
+    const url = `https://api.resy.com/4/find?lat=${params.lat || 33.749}&long=${params.lng || -84.388}&day=${params.date}&party_size=${params.party_size}`;
+    console.log("Resy [1] GET /4/find");
+
+    const res = await withTimeout(fetch(url, { headers }), 8000);
+
+    if (res.ok) {
+      const data = await res.json();
+      const venues = data?.results?.venues || [];
+      console.log("Resy [1] found", venues.length, "venues");
+      if (venues.length > 0) {
+        return venues.slice(0, 10).map((v) => {
+          const venue = v.venue || v;
+          const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+          return {
+            name: venue.name || "",
+            cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
+            price: venue.price_range ? "$".repeat(venue.price_range) : "",
+            rating: venue.rating || null,
+            reviewCount: venue.num_ratings || null,
+            address: venue.neighborhood || venue.location?.neighborhood || "",
+            platform: "Resy",
+            hasAvailability: (v.slots?.length || 0) > 0,
+            bookingUrl: `https://resy.com/cities/${citySlug}/${slug}?date=${params.date}&seats=${params.party_size}`,
+            profileUrl: `https://resy.com/cities/${citySlug}/${slug}`,
+          };
+        }).filter(r => r.name);
+      }
+    } else {
+      const err = await res.text().catch(() => "");
+      console.error("Resy [1]", res.status, err.slice(0, 500));
+    }
+  } catch (e) {
+    console.error("Resy [1] error:", e.message);
+  }
+
+  // ---- Approach 2: POST /3/venuesearch/search ----
+  try {
+    const body = {
+      geo: { latitude: params.lat || 33.749, longitude: params.lng || -84.388 },
+      per_page: 10,
+      slot_filter: { day: params.date, party_size: params.party_size },
+      types: ["venue"],
+    };
+    // Only add query if non-empty
+    if (params.query) body.query = params.query;
+
+    console.log("Resy [2] POST venuesearch:", JSON.stringify(body));
+
+    const res = await withTimeout(
+      fetch("https://api.resy.com/3/venuesearch/search", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      8000
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      console.log("Resy [2] response keys:", Object.keys(data || {}).join(", "));
+      const venues = data?.search?.hits || data?.results || [];
+      console.log("Resy [2] found", venues.length, "venues");
+      if (venues.length > 0) return mapResyVenues(venues, params, citySlug);
+    } else {
+      const err = await res.text().catch(() => "");
+      console.error("Resy [2]", res.status, err.slice(0, 500));
+    }
+  } catch (e) {
+    console.error("Resy [2] error:", e.message);
+  }
+
+  // ---- Approach 3: GET /2/search (older endpoint) ----
+  try {
+    const url = `https://api.resy.com/2/search?lat=${params.lat || 33.749}&long=${params.lng || -84.388}&query=${encodeURIComponent(params.query || "")}&limit=10`;
+    console.log("Resy [3] GET /2/search");
+
+    const res = await withTimeout(fetch(url, { headers }), 8000);
+
+    if (res.ok) {
+      const data = await res.json();
+      console.log("Resy [3] response keys:", Object.keys(data || {}).join(", "));
+      const venues = data?.results || data?.hits || data?.venues || [];
+      console.log("Resy [3] found", venues.length, "venues");
+      if (venues.length > 0) return mapResyVenues(venues, params, citySlug);
+    } else {
+      const err = await res.text().catch(() => "");
+      console.error("Resy [3]", res.status, err.slice(0, 500));
+    }
+  } catch (e) {
+    console.error("Resy [3] error:", e.message);
+  }
+
+  console.log("Resy: all approaches failed");
+  return [];
+}
+
+function mapResyVenues(venues, params, citySlug) {
+  return venues.slice(0, 10).map((venue) => {
+    const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return {
+      name: venue.name || "",
+      cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
+      price: venue.price_range ? "$".repeat(venue.price_range) : (venue.price ? "$".repeat(venue.price) : ""),
+      rating: venue.rating || venue.score || null,
+      reviewCount: venue.num_ratings || null,
+      address: venue.location?.neighborhood || venue.neighborhood || venue.region || "",
+      platform: "Resy",
+      hasAvailability: venue.available !== false && venue.notify_available !== true,
+      bookingUrl: `https://resy.com/cities/${citySlug}/${slug}?date=${params.date}&seats=${params.party_size}`,
+      profileUrl: `https://resy.com/cities/${citySlug}/${slug}`,
+    };
+  }).filter(r => r.name);
+}
+
+// ============================================================
+// STEP 3: Yelp Fusion API
+// ============================================================
+
+async function searchYelp(params) {
+  if (!YELP_API_KEY) {
+    console.log("Yelp: no API key configured");
+    return [];
+  }
+
+  try {
+    const url = new URL("https://api.yelp.com/v3/businesses/search");
+    url.searchParams.set("latitude", params.lat || 33.749);
+    url.searchParams.set("longitude", params.lng || -84.388);
+    url.searchParams.set("categories", "restaurants");
+    url.searchParams.set("limit", "15");
+    url.searchParams.set("sort_by", "best_match");
+    if (params.query) url.searchParams.set("term", params.query);
+
+    // Convert date + time to unix timestamp for open_at filter
+    try {
+      const dt = new Date(`${params.date}T${params.time}:00`);
+      if (!isNaN(dt.getTime())) {
+        url.searchParams.set("open_at", Math.floor(dt.getTime() / 1000).toString());
+      }
+    } catch {}
+
+    console.log("Yelp: searching", params.query || "(all)", "near", params.lat, params.lng);
+
+    const res = await withTimeout(
+      fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${YELP_API_KEY}`,
+          Accept: "application/json",
+        },
+      }),
+      8000
+    );
+
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      console.error("Yelp:", res.status, err.slice(0, 300));
+      return [];
+    }
+
+    const data = await res.json();
+    const businesses = data?.businesses || [];
+    console.log("Yelp: found", businesses.length, "businesses");
+
+    return businesses.slice(0, 10).map((biz) => {
+      // Check if business supports reservations
+      const hasReservation = biz.transactions?.includes("restaurant_reservation");
+
+      // Build Yelp URL
+      const yelpUrl = biz.url?.split("?")[0] || `https://www.yelp.com/biz/${biz.alias || ""}`;
+
+      return {
+        name: biz.name || "",
+        cuisine: biz.categories?.map(c => c.title).join(", ") || "",
+        price: biz.price || "",
+        rating: biz.rating || null,
+        reviewCount: biz.review_count || null,
+        address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
+        platform: "Yelp",
+        hasAvailability: hasReservation,
+        bookingUrl: yelpUrl,
+        profileUrl: yelpUrl,
+        phone: biz.display_phone || "",
+        distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
+        imageUrl: biz.image_url || "",
+      };
+    }).filter(r => r.name);
+  } catch (e) {
+    console.error("Yelp error:", e.message);
+    return [];
+  }
+}
+
+// ============================================================
+// RATE LIMITING + CACHING
+// ============================================================
+
+const rateLimit = new Map();
+const cache = new Map();
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const entry = rateLimit.get(ip);
+  if (!entry || now - entry.start > 3600000) {
+    rateLimit.set(ip, { count: 1, start: now });
+    return true;
+  }
+  if (entry.count >= 30) return false;
+  entry.count++;
+  return true;
+}
+
+function getCacheKey(p) {
+  return `${p.query}|${p.date}|${p.time}|${p.party_size}|${Math.round((p.lat||0)*100)}|${Math.round((p.lng||0)*100)}`.toLowerCase();
+}
+
+// ============================================================
+// MAIN HANDLER
+// ============================================================
+
+export async function POST(req) {
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (!checkRateLimit(ip)) {
+    return Response.json({ error: "Rate limit reached. Try again shortly." }, { status: 429 });
+  }
+  if (!GEMINI_KEY) {
+    return Response.json({ error: "GEMINI_API_KEY not configured" }, { status: 500 });
+  }
+
+  try {
+    const { messages, location } = await req.json();
+    const lastMessage = messages?.filter((m) => m.role === "user").pop()?.content || "";
+    if (!lastMessage) {
+      return Response.json({ error: "No message provided" }, { status: 400 });
+    }
+
+    const params = await parseQuery(lastMessage, location);
+
+    // Cache check
+    const cacheKey = getCacheKey(params);
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.time < 600000) {
+      console.log("Cache hit:", cacheKey);
+      return Response.json({ ...cached.data, cached: true });
+    }
+
+    // Search all platforms in parallel
+    const startTime = Date.now();
+    const platforms = [
+      searchResy(params).catch(e => { console.error("Resy fatal:", e.message); return []; }),
+      searchYelp(params).catch(e => { console.error("Yelp fatal:", e.message); return []; }),
+    ];
+
+    const [resyResults, yelpResults] = await Promise.all(platforms);
+    const elapsed = Date.now() - startTime;
+    console.log(`Done in ${elapsed}ms: Resy=${resyResults.length}, Yelp=${yelpResults.length}`);
+
+    // Merge results, deduplicate by name similarity
+    const allResults = [...resyResults];
+    const resyNames = new Set(resyResults.map(r => r.name.toLowerCase().replace(/[^a-z]/g, "")));
+
+    for (const yelp of yelpResults) {
+      const normalized = yelp.name.toLowerCase().replace(/[^a-z]/g, "");
+      // Skip if already found on Resy (prefer Resy since it has direct booking)
+      if (!resyNames.has(normalized)) {
+        allResults.push(yelp);
+      }
+    }
+
+    // Sort: availability first, then by rating
+    allResults.sort((a, b) => {
+      if (a.hasAvailability && !b.hasAvailability) return -1;
+      if (!a.hasAvailability && b.hasAvailability) return 1;
+      return (b.rating || 0) - (a.rating || 0);
+    });
+
+    const structured = {
+      type: "results",
+      searchParams: params,
+      restaurants: allResults,
+      resultCount: allResults.length,
+      platformsSearched: [
+        "Resy",
+        ...(YELP_API_KEY ? ["Yelp"] : []),
+      ],
+      elapsed,
+    };
+
+    let reply;
+    if (allResults.length === 0) {
+      reply = `No restaurants found for "${params.query || "your search"}" in ${params.city || "your area"} on ${params.date}. Try a different cuisine, date, or location.`;
+    } else {
+      const resyCount = resyResults.length;
+      const yelpCount = yelpResults.length;
+      const parts = [];
+      if (resyCount > 0) parts.push(`${resyCount} from Resy`);
+      if (yelpCount > 0) parts.push(`${yelpCount} from Yelp`);
+      reply = `Found ${allResults.length} restaurants (${parts.join(", ")}) in ${params.city || "your area"}.`;
+    }
+
+    const responseData = { reply, structured, searchParams: params };
+
+    // Cache
+    cache.set(cacheKey, { data: responseData, time: Date.now() });
+    if (cache.size > 200) {
+      const oldest = [...cache.entries()].sort((a, b) => a[1].time - b[1].time);
+      for (let i = 0; i < 50; i++) cache.delete(oldest[i][0]);
+    }
+
+    return Response.json(responseData);
+  } catch (e) {
+    console.error("Handler error:", e);
+    return Response.json({ error: `Search failed: ${e.message}` }, { status: 500 });
+  }
 }
