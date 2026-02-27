@@ -52,15 +52,22 @@ User message: "${userMessage}"`;
     }
   );
 
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("Gemini API error:", res.status, errText.slice(0, 300));
+    // If Gemini fails, build params manually from what we know
+    return buildFallbackParams(userMessage, location, today, currentHour);
+  }
+
   const data = await res.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  console.log("Gemini raw response:", text.slice(0, 500));
   const clean = text.replace(/```json|```/g, "").trim();
 
   try {
     const parsed = JSON.parse(clean);
     // ALWAYS override with detected location if user didn't specify a different city
     if (location?.lat) {
-      // If Gemini returned the same city as detected, or no city, use exact coordinates
       if (!parsed.city || parsed.city.toLowerCase() === (location.city || "").toLowerCase()) {
         parsed.lat = location.lat;
         parsed.lng = location.lng;
@@ -68,7 +75,6 @@ User message: "${userMessage}"`;
         parsed.state = location.region || parsed.state;
       }
     }
-    // Fallback: if still no location at all, use detected
     if (!parsed.lat && location?.lat) {
       parsed.lat = location.lat;
       parsed.lng = location.lng;
@@ -82,9 +88,71 @@ User message: "${userMessage}"`;
     console.log("Parsed query:", JSON.stringify(parsed));
     return parsed;
   } catch (e) {
-    console.error("Failed to parse Gemini response:", text);
-    return null;
+    console.error("Failed to parse Gemini response:", clean.slice(0, 300));
+    return buildFallbackParams(userMessage, location, today, currentHour);
   }
+}
+
+// Fallback: parse query without AI if Gemini is unavailable
+function buildFallbackParams(userMessage, location, today, currentHour) {
+  const msg = userMessage.toLowerCase();
+
+  // Extract party size
+  const partyMatch = msg.match(/(?:for|party of|group of)\s*(\d+)/);
+  const party_size = partyMatch ? parseInt(partyMatch[1]) : 2;
+
+  // Extract date
+  let date = today;
+  if (msg.includes("tomorrow")) {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    date = d.toISOString().split("T")[0];
+  } else if (msg.includes("saturday")) {
+    const d = new Date();
+    const daysUntil = (6 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntil);
+    date = d.toISOString().split("T")[0];
+  } else if (msg.includes("friday")) {
+    const d = new Date();
+    const daysUntil = (5 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntil);
+    date = d.toISOString().split("T")[0];
+  } else if (msg.includes("sunday")) {
+    const d = new Date();
+    const daysUntil = (0 - d.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + daysUntil);
+    date = d.toISOString().split("T")[0];
+  }
+
+  // Extract time
+  let time = currentHour >= 19 ? `${currentHour + 1}:00` : "19:00";
+  const timeMatch = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
+  if (timeMatch) {
+    let h = parseInt(timeMatch[1]);
+    const m = timeMatch[2] || "00";
+    if (timeMatch[3].toLowerCase() === "pm" && h < 12) h += 12;
+    if (timeMatch[3].toLowerCase() === "am" && h === 12) h = 0;
+    time = `${h.toString().padStart(2, "0")}:${m}`;
+  }
+
+  // Extract cuisine (just use the main keywords)
+  const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "barbecue", "pizza", "vietnamese", "greek", "ethiopian", "spanish", "tapas"];
+  const query = cuisines.find(c => msg.includes(c)) || msg.replace(/for \d+|tonight|tomorrow|saturday|friday|sunday|near me|in \w+/gi, "").trim().split(/\s+/).slice(0, 3).join(" ");
+
+  const params = {
+    cuisine: query,
+    date,
+    time,
+    party_size,
+    city: location?.city || "",
+    state: location?.region || "",
+    lat: location?.lat || null,
+    lng: location?.lng || null,
+    query,
+  };
+
+  console.log("Fallback parsed:", JSON.stringify(params));
+  return params;
 }
 
 // ============================================================
@@ -495,12 +563,6 @@ export async function POST(req) {
 
     // Step 1: Parse the query
     const params = await parseQuery(lastMessage, location);
-    if (!params) {
-      return Response.json({
-        reply: "I couldn't understand your search. Try something like: \"Mexican for 2 tonight in Atlanta\"",
-        structured: null,
-      });
-    }
 
     // Check cache
     const cacheKey = getCacheKey(params);
