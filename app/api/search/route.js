@@ -14,8 +14,8 @@ async function parseQuery(userMessage, location) {
 
   const prompt = `You are a query parser. Extract restaurant search parameters from the user's message.
 Today's date is ${today}. Current time is ${currentHour}:00.
-${location?.city ? `User is in ${location.city}, ${location.region || ""}.` : ""}
-${location?.lat ? `Coordinates: ${location.lat}, ${location.lng}` : ""}
+${location?.city ? `IMPORTANT: The user is located in ${location.city}, ${location.region || ""}. ALWAYS use this as the default location unless the user explicitly names a different city.` : ""}
+${location?.lat ? `User coordinates: ${location.lat}, ${location.lng}` : ""}
 
 Return ONLY a JSON object, no markdown, no explanation:
 {
@@ -35,8 +35,8 @@ Rules:
 - "tomorrow" = tomorrow's date
 - "this Saturday" = next Saturday
 - If no cuisine specified, use empty string
-- If user says "near me" or no location, use their detected location
-- Always include lat/lng if available from user location
+- CRITICAL: If the user does NOT mention a specific city, ALWAYS default city to "${location?.city || ""}" and state to "${location?.region || ""}" and lat to ${location?.lat || "null"} and lng to ${location?.lng || "null"}
+- Only use a different city if the user explicitly says something like "in Chicago" or "NYC restaurants"
 
 User message: "${userMessage}"`;
 
@@ -58,7 +58,17 @@ User message: "${userMessage}"`;
 
   try {
     const parsed = JSON.parse(clean);
-    // Use detected location as fallback
+    // ALWAYS override with detected location if user didn't specify a different city
+    if (location?.lat) {
+      // If Gemini returned the same city as detected, or no city, use exact coordinates
+      if (!parsed.city || parsed.city.toLowerCase() === (location.city || "").toLowerCase()) {
+        parsed.lat = location.lat;
+        parsed.lng = location.lng;
+        parsed.city = location.city || parsed.city;
+        parsed.state = location.region || parsed.state;
+      }
+    }
+    // Fallback: if still no location at all, use detected
     if (!parsed.lat && location?.lat) {
       parsed.lat = location.lat;
       parsed.lng = location.lng;
