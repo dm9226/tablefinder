@@ -83,11 +83,39 @@ User message: "${userMessage}"`;
     if (!parsed.state && location?.region) parsed.state = location.region;
 
     console.log("Parsed:", JSON.stringify(parsed));
-    return parsed;
+    return sanitizeParams(parsed);
   } catch (e) {
     console.error("Parse error:", e.message);
-    return buildFallbackParams(userMessage, location, today, currentHour);
+    return sanitizeParams(buildFallbackParams(userMessage, location, today, currentHour));
   }
+}
+
+function sanitizeParams(params) {
+  // Fix invalid times
+  const timeParts = (params.time || "19:00").match(/^(\d{1,2}):(\d{2})$/);
+  if (timeParts) {
+    let h = parseInt(timeParts[1]);
+    if (h >= 24) h = 21;
+    if (h < 0) h = 19;
+    params.time = `${h.toString().padStart(2, "0")}:${timeParts[2]}`;
+  } else {
+    params.time = "19:00";
+  }
+
+  // Strip bad search terms
+  const badTerms = ["table", "restaurant", "restaurants", "food", "dinner", "lunch", "reservation", "book", "find", "me", "please"];
+  if (params.query && badTerms.includes(params.query.toLowerCase().trim())) {
+    params.query = "";
+  }
+  if (params.cuisine && badTerms.includes(params.cuisine.toLowerCase().trim())) {
+    params.cuisine = "";
+  }
+
+  // Ensure party_size is valid
+  params.party_size = Math.max(1, Math.min(20, parseInt(params.party_size) || 2));
+
+  console.log("Sanitized:", JSON.stringify(params));
+  return params;
 }
 
 function buildFallbackParams(userMessage, location, today, currentHour) {
@@ -106,7 +134,7 @@ function buildFallbackParams(userMessage, location, today, currentHour) {
     const d = new Date(); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
   }
 
-  let time = currentHour >= 19 ? `${currentHour + 1}:00` : "19:00";
+  let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
   const timeMatch = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
   if (timeMatch) {
     let h = parseInt(timeMatch[1]);
@@ -117,7 +145,15 @@ function buildFallbackParams(userMessage, location, today, currentHour) {
   }
 
   const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "pizza", "vietnamese", "greek", "spanish", "tapas"];
-  const query = cuisines.find(c => msg.includes(c)) || msg.replace(/for \d+|tonight|tomorrow|saturday|friday|sunday|near me|in \w+/gi, "").trim().split(/\s+/).slice(0, 3).join(" ");
+  const stopWords = ["table", "restaurant", "restaurants", "food", "dinner", "lunch", "eat", "eating", "place", "places", "good", "best", "find", "me", "a", "the", "get", "book", "reserve", "reservation", "tonight", "tomorrow", "near", "nearby"];
+  const foundCuisine = cuisines.find(c => msg.includes(c));
+  let query = "";
+  if (foundCuisine) {
+    query = foundCuisine;
+  } else {
+    query = msg.replace(/for \d+|tonight|tomorrow|saturday|friday|sunday|near me|in \w+|\d{1,2}(:\d{2})?\s*(pm|am)/gi, "").trim()
+      .split(/\s+/).filter(w => !stopWords.includes(w)).slice(0, 3).join(" ");
+  }
 
   return {
     cuisine: query, date, time, party_size,
@@ -132,42 +168,64 @@ function buildFallbackParams(userMessage, location, today, currentHour) {
 
 async function searchOpenTable(params) {
   try {
-    const citySlug = (params.city || "atlanta").toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const dateTime = `${params.date}T${params.time}:00`;
     const term = params.query || params.cuisine || "";
 
-    const url = `https://www.opentable.com/s/${citySlug}-restaurant-reservations?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&term=${encodeURIComponent(term)}&latitude=${params.lat || ""}&longitude=${params.lng || ""}`;
-    console.log("OpenTable URL:", url);
+    // Try OpenTable's internal REST API used by their frontend
+    // This is less likely to be blocked than full page fetches
+    const apiUrl = new URL("https://www.opentable.com/dapi/fe/gql");
+    apiUrl.searchParams.set("optype", "query");
+    apiUrl.searchParams.set("opname", "RestaurantsAvailability");
+
+    const gqlBody = {
+      operationName: "RestaurantsAvailability",
+      variables: {
+        term: term,
+        latitude: params.lat || 33.749,
+        longitude: params.lng || -84.388,
+        dateTime: dateTime,
+        partySize: params.party_size,
+        metroId: 0,
+        regionIds: [],
+        cuisineIds: [],
+        sortBy: "Popularity",
+        rows: 10,
+        requireAvailability: false,
+      },
+    };
+
+    console.log("OpenTable API:", term, params.lat, params.lng);
 
     const res = await withTimeout(
-      fetch(url, {
+      fetch(apiUrl.toString(), {
+        method: "POST",
         headers: {
+          "Content-Type": "application/json",
           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
+          "Accept": "application/json",
+          "Origin": "https://www.opentable.com",
+          "Referer": "https://www.opentable.com/",
         },
+        body: JSON.stringify(gqlBody),
       }),
       8000
     );
 
-    if (!res.ok) { console.error("OpenTable:", res.status); return []; }
+    console.log("OpenTable API status:", res.status);
 
-    const html = await res.text();
-    console.log("OpenTable: got", html.length, "bytes");
+    if (!res.ok) {
+      // If GQL fails, try building direct booking links from a simple text search
+      console.log("OpenTable API failed, building fallback links");
+      return buildOpenTableFallbackLinks(params);
+    }
 
-    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!match) { console.log("OpenTable: no __NEXT_DATA__"); return []; }
-
-    const nextData = JSON.parse(match[1]);
-    const pageProps = nextData?.props?.pageProps;
-    console.log("OpenTable pageProps keys:", Object.keys(pageProps || {}).join(", "));
+    const data = await res.json();
+    console.log("OpenTable API keys:", JSON.stringify(Object.keys(data?.data || data || {})).slice(0, 200));
 
     const restaurants =
-      pageProps?.restaurants ||
-      pageProps?.searchResult?.restaurants ||
-      pageProps?.results?.restaurants ||
-      pageProps?.searchData?.restaurants ||
-      pageProps?.initialState?.restaurants ||
+      data?.data?.availability?.restaurants ||
+      data?.data?.restaurantsAvailability?.restaurants ||
+      data?.data?.restaurants ||
       [];
 
     console.log("OpenTable: found", restaurants.length, "restaurants");
@@ -177,32 +235,51 @@ async function searchOpenTable(params) {
       const slug = r.urls?.profileLink || r.profileLink || "";
       const profileUrl = slug.startsWith("http") ? slug : slug ? `https://www.opentable.com${slug}` : "";
 
-      const hasAvailability = r.availability?.timeSlots?.length > 0 ||
-        r.timeslots?.length > 0 ||
-        r.slots?.length > 0 ||
-        r.hasAvailability === true;
-
       const bookingUrl = rid
         ? `https://www.opentable.com/restref/client/?rid=${rid}&dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&restref=true`
         : `${profileUrl}?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}`;
 
       return {
         name: r.name || "",
-        cuisine: r.primaryCuisine?.name || r.cuisine || r.primaryCuisineType || "",
-        price: r.priceRange || r.priceBand || ("$".repeat(r.pricing?.priceRange || 0)) || "",
-        rating: r.statistics?.ratings?.overall?.rating || r.statistics?.ratings?.overall || r.rating?.overall || r.overallRating || r.rating || null,
+        cuisine: r.primaryCuisine?.name || r.cuisine || "",
+        price: r.priceRange || r.priceBand || "",
+        rating: r.statistics?.ratings?.overall?.rating || r.statistics?.ratings?.overall || r.rating || null,
         reviewCount: r.statistics?.reviews?.count || r.reviewCount || null,
-        address: r.neighborhood || [r.location?.neighborhood, r.location?.city].filter(Boolean).join(", ") || r.address || "",
+        address: r.neighborhood || r.address || "",
         platform: "OpenTable",
-        hasAvailability,
+        hasAvailability: true,
         bookingUrl,
         profileUrl: profileUrl || bookingUrl,
       };
     }).filter(r => r.name);
   } catch (e) {
     console.error("OpenTable error:", e.message);
-    return [];
+    // Return a fallback link to OpenTable search so user can at least search manually
+    return buildOpenTableFallbackLinks(params);
   }
+}
+
+function buildOpenTableFallbackLinks(params) {
+  // When API fails, return a single entry that links to OpenTable search results
+  const citySlug = (params.city || "atlanta").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const dateTime = `${params.date}T${params.time}:00`;
+  const term = params.query || params.cuisine || "";
+
+  const searchUrl = `https://www.opentable.com/s?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&term=${encodeURIComponent(term)}&latitude=${params.lat || ""}&longitude=${params.lng || ""}`;
+
+  return [{
+    name: `Search OpenTable for "${term || "restaurants"}" in ${params.city || "your area"}`,
+    cuisine: "",
+    price: "",
+    rating: null,
+    reviewCount: null,
+    address: "Click to view results on OpenTable",
+    platform: "OpenTable",
+    hasAvailability: false,
+    bookingUrl: searchUrl,
+    profileUrl: searchUrl,
+    isFallbackLink: true,
+  }];
 }
 
 // ============================================================
