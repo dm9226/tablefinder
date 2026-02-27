@@ -161,130 +161,83 @@ function buildFallbackParams(userMessage, location, today, currentHour) {
 
 async function searchOpenTable(params) {
   try {
-    console.log("OpenTable: searching...", params.query, params.city);
+    console.log("OpenTable: searching...", params.query, params.city, params.lat, params.lng);
 
-    // Step 2a: Get a CSRF token by visiting the site
-    const homeRes = await fetch("https://www.opentable.com", {
+    const citySlug = (params.city || "atlanta").toLowerCase().replace(/\s+/g, "-");
+    const dateTime = `${params.date}T${params.time}:00`;
+    const term = params.query || params.cuisine || "";
+
+    // Use OpenTable's actual search URL format with city in path
+    const searchUrl = `https://www.opentable.com/s/${encodeURIComponent(citySlug)}-restaurant-reservations?dateTime=${encodeURIComponent(dateTime)}&covers=${params.party_size}&term=${encodeURIComponent(term)}&latitude=${params.lat || ""}&longitude=${params.lng || ""}`;
+
+    console.log("OpenTable URL:", searchUrl);
+
+    const res = await fetch(searchUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
       },
     });
 
-    // Extract CSRF token from cookies
-    const cookies = homeRes.headers.get("set-cookie") || "";
-    const csrfMatch = cookies.match(/csrf_token=([^;]+)/);
-    const csrfToken = csrfMatch ? csrfMatch[1] : "";
-    const allCookies = cookies
-      .split(",")
-      .map((c) => c.trim().split(";")[0])
-      .join("; ");
+    console.log("OpenTable status:", res.status);
 
-    console.log("OpenTable: got CSRF token:", csrfToken ? "yes" : "no");
-
-    // Step 2b: Use the GraphQL endpoint to search for restaurants with availability
-    const dateTime = `${params.date}T${params.time}:00`;
-
-    const gqlPayload = {
-      operationName: "RestaurantsAvailability",
-      variables: {
-        restaurantIds: [],
-        date: params.date,
-        time: params.time,
-        partySize: params.party_size,
-        latitude: params.lat,
-        longitude: params.lng,
-        term: params.query || params.cuisine || "",
-        metroId: 0,
-        regionIds: [],
-        cuisineIds: [],
-        sortBy: "Popularity",
-        rows: 10,
-        enableBoostedResults: false,
-      },
-      extensions: {
-        persistedQuery: {
-          version: 1,
-          sha256Hash: "", // This may need updating
-        },
-      },
-    };
-
-    // Try the search URL approach instead - more reliable
-    const searchUrl = new URL("https://www.opentable.com/dapi/fe/gql");
-    searchUrl.searchParams.set("optype", "query");
-    searchUrl.searchParams.set("opname", "RestaurantsAvailability");
-
-    const gqlRes = await fetch(searchUrl.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "x-csrf-token": csrfToken,
-        Cookie: allCookies,
-        Origin: "https://www.opentable.com",
-        Referer: "https://www.opentable.com/",
-      },
-      body: JSON.stringify(gqlPayload),
-    });
-
-    console.log("OpenTable GQL status:", gqlRes.status);
-
-    if (gqlRes.ok) {
-      const gqlData = await gqlRes.json();
-      return parseOpenTableResults(gqlData, params);
+    if (!res.ok) {
+      console.error("OpenTable search failed:", res.status);
+      return [];
     }
 
-    // Fallback: Try the direct search URL that returns availability
-    console.log("OpenTable: GQL failed, trying search URL fallback...");
-    return await searchOpenTableFallback(params, allCookies, csrfToken);
+    const html = await res.text();
+    console.log("OpenTable HTML length:", html.length);
+
+    // OpenTable embeds search results as JSON in __NEXT_DATA__
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!nextDataMatch) {
+      console.log("OpenTable: No __NEXT_DATA__ found, trying JSON-LD...");
+      // Try extracting from JSON-LD or other embedded data
+      return parseOpenTableHTML(html, params);
+    }
+
+    try {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      console.log("OpenTable: Got __NEXT_DATA__, keys:", Object.keys(nextData?.props?.pageProps || {}).join(", "));
+      return parseOpenTableNextData(nextData, params);
+    } catch (e) {
+      console.error("OpenTable: Failed to parse __NEXT_DATA__:", e.message);
+      return [];
+    }
   } catch (e) {
     console.error("OpenTable error:", e.message);
     return [];
   }
 }
 
-async function searchOpenTableFallback(params, cookies, csrf) {
+function parseOpenTableHTML(html, params) {
+  // Fallback: try to extract restaurant data from HTML if __NEXT_DATA__ isn't available
   try {
-    // OpenTable's search API endpoint used by their frontend
-    const searchParams = new URLSearchParams({
-      dateTime: `${params.date}T${params.time}`,
-      covers: params.party_size.toString(),
-      term: params.query || params.cuisine || "",
-      latitude: (params.lat || "").toString(),
-      longitude: (params.lng || "").toString(),
-    });
-
-    const searchUrl = `https://www.opentable.com/dapi/fe/gql?optype=query&opname=Autocomplete`;
-    
-    // Alternative: try the restaurant search endpoint
-    const restSearchUrl = `https://www.opentable.com/s?${searchParams.toString()}`;
-
-    const res = await fetch(restSearchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        Cookie: cookies || "",
-      },
-    });
-
-    console.log("OpenTable search fallback status:", res.status);
-
-    if (!res.ok) return [];
-
-    const html = await res.text();
-
-    // OpenTable embeds JSON data in __NEXT_DATA__ script tag
-    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!nextDataMatch) {
-      console.log("OpenTable: No __NEXT_DATA__ found");
-      return [];
+    const results = [];
+    // Look for restaurant cards with data attributes or structured data
+    const jsonLdMatches = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
+    for (const match of jsonLdMatches) {
+      try {
+        const json = JSON.parse(match.replace(/<script[^>]*>/, "").replace(/<\/script>/, ""));
+        if (json["@type"] === "Restaurant" || json["@type"] === "FoodEstablishment") {
+          results.push({
+            name: json.name || "",
+            cuisine: json.servesCuisine || "",
+            price: json.priceRange || "",
+            rating: json.aggregateRating?.ratingValue || null,
+            address: json.address?.streetAddress || json.address?.addressLocality || "",
+            platform: "OpenTable",
+            slots: [],
+            profileUrl: json.url || "",
+          });
+        }
+      } catch {}
     }
-
-    const nextData = JSON.parse(nextDataMatch[1]);
-    return parseOpenTableNextData(nextData, params);
+    return results;
   } catch (e) {
-    console.error("OpenTable fallback error:", e.message);
+    console.error("OpenTable HTML parse error:", e.message);
     return [];
   }
 }
@@ -386,6 +339,7 @@ async function searchResy(params) {
         latitude: params.lat || 33.749,
         longitude: params.lng || -84.388,
       },
+      location: params.city || "Atlanta",
       per_page: 10,
       query: params.query || params.cuisine || "",
       slot_filter: {
@@ -394,6 +348,8 @@ async function searchResy(params) {
       },
       types: ["venue"],
     };
+
+    console.log("Resy search body:", JSON.stringify({ geo: searchBody.geo, location: searchBody.location, query: searchBody.query }));
 
     const searchRes = await fetch(searchUrl.toString(), {
       method: "POST",
