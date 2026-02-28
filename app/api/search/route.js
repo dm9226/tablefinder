@@ -67,10 +67,16 @@ function buildFallback(msg, location, today, currentHour) {
   const party = msg.match(/(?:for|party of|group of)\s*(\d+)/);
   const party_size = party ? parseInt(party[1]) : 2;
   let date = today;
-  if (msg.includes("tomorrow")) { const d = new Date(); d.setDate(d.getDate() + 1); date = d.toISOString().split("T")[0]; }
-  else if (msg.includes("saturday")) { const d = new Date(); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0]; }
-  else if (msg.includes("friday")) { const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0]; }
-  else if (msg.includes("sunday")) { const d = new Date(); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0]; }
+
+  // Use client's today date for relative day calculations (not new Date() which is server UTC)
+  const todayParts = today.split("-").map(Number); // [2026, 2, 27]
+  const baseDate = new Date(todayParts[0], todayParts[1] - 1, todayParts[2]);
+  const fmtDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  if (msg.includes("tomorrow")) { const d = new Date(baseDate); d.setDate(d.getDate() + 1); date = fmtDate(d); }
+  else if (msg.includes("saturday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
+  else if (msg.includes("friday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
+  else if (msg.includes("sunday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
 
   let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
   const tm = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
@@ -354,14 +360,9 @@ async function searchYelp(params) {
     url.searchParams.set("limit", "20");
     url.searchParams.set("sort_by", "distance");
     if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
+    url.searchParams.set("attributes", "reservation");
 
-    // Pass reservation params so Yelp only returns restaurants with ACTUAL availability
-    url.searchParams.set("reservation_date", params.date || "");
-    url.searchParams.set("reservation_time", params.time || "19:00");
-    url.searchParams.set("reservation_covers", (params.party_size || 2).toString());
-
-    console.log("Yelp: category=" + (yelpCategory || "restaurants"),
-      "date=" + params.date, "time=" + params.time, "covers=" + params.party_size);
+    console.log("Yelp: category=" + (yelpCategory || "restaurants"), "term=" + (url.searchParams.get("term") || "(none)"));
 
     const res = await withTimeout(
       fetch(url.toString(), {
@@ -378,71 +379,28 @@ async function searchYelp(params) {
     if (!res.ok) {
       const err = await res.text().catch(() => "");
       console.error("Yelp error:", res.status, err.slice(0, 500));
-
-      // If reservation params fail, fall back to attributes=reservation
-      if (res.status === 400 || res.status === 401) {
-        console.log("Yelp: retrying with attributes=reservation fallback");
-        url.searchParams.delete("reservation_date");
-        url.searchParams.delete("reservation_time");
-        url.searchParams.delete("reservation_covers");
-        url.searchParams.set("attributes", "reservation");
-        const retry = await withTimeout(
-          fetch(url.toString(), {
-            headers: { Authorization: `Bearer ${YELP_API_KEY}`, Accept: "application/json" },
-          }),
-          8000
-        );
-        if (retry.ok) {
-          const data = await retry.json();
-          console.log("Yelp fallback:", data.businesses?.length || 0, "businesses");
-          // Fallback mode: flag these as unverified availability
-          return mapYelpResults(data.businesses || [], true, params);
-        } else {
-          const retryErr = await retry.text().catch(() => "");
-          console.error("Yelp fallback error:", retry.status, retryErr.slice(0, 300));
-        }
-      }
       return [];
     }
 
     const data = await res.json();
     console.log("Yelp:", data.businesses?.length || 0, "businesses");
-    // Log first result to see if reservation_openings are included
-    if (data.businesses?.[0]) {
-      console.log("Yelp biz[0] keys:", Object.keys(data.businesses[0]).join(", "));
-      if (data.businesses[0].reservation_openings) {
-        console.log("Yelp biz[0] openings:", JSON.stringify(data.businesses[0].reservation_openings).slice(0, 300));
-      }
-    }
-    return mapYelpResults(data.businesses || [], false, params);
+    return mapYelpResults(data.businesses || [], params);
   } catch (e) {
     console.error("Yelp error:", e.message);
     return [];
   }
 }
 
-function mapYelpResults(businesses, wasFallback, params) {
+function mapYelpResults(businesses, params) {
   const yelpTime = (params?.time || "19:00").replace(":", "");
 
   return businesses.slice(0, 10).map((biz) => {
     const alias = biz.alias || "";
     const profileUrl = `https://www.yelp.com/biz/${alias}`;
+    const hasReservation = biz.transactions?.includes("restaurant_reservation");
+    if (!hasReservation) return null;
 
-    // If we got reservation_openings from the real reservation params, use those
-    const openings = biz.reservation_openings || [];
-    const hasRealOpenings = openings.length > 0;
-
-    // If this came from the real reservation search (not fallback), the restaurant
-    // was returned because it has availability — trust it
-    const hasAvailability = !wasFallback || hasRealOpenings || biz.transactions?.includes("restaurant_reservation");
-
-    // Build booking URL — use first opening URL if available, otherwise construct
-    let bookingUrl;
-    if (hasRealOpenings && openings[0]?.url) {
-      bookingUrl = openings[0].url;
-    } else {
-      bookingUrl = `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
-    }
+    const bookingUrl = `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
 
     return {
       name: biz.name || "",
@@ -452,15 +410,13 @@ function mapYelpResults(businesses, wasFallback, params) {
       reviewCount: biz.review_count || null,
       address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
       platform: "Yelp",
-      hasAvailability,
-      // If fallback mode, flag it so UI can show different label
-      availabilityVerified: !wasFallback,
+      hasAvailability: true,
       bookingUrl,
       profileUrl,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
       distanceMeters: biz.distance || null,
     };
-  }).filter(r => r.name && r.hasAvailability);
+  }).filter(Boolean);
 }
 
 // ============================================================
