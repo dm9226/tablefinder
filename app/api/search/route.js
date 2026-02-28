@@ -16,9 +16,11 @@ function withTimeout(promise, ms) {
 // STEP 1: Parse query
 // ============================================================
 
-async function parseQuery(userMessage, location) {
-  const today = new Date().toISOString().split("T")[0];
-  const currentHour = new Date().getHours();
+async function parseQuery(userMessage, location, clientTime) {
+  // Use CLIENT's local date/time, not server UTC
+  const today = clientTime?.localDate || new Date().toISOString().split("T")[0];
+  const currentHour = clientTime?.localHour ?? new Date().getHours();
+  console.log("Client time:", today, `hour=${currentHour}`);
 
   const prompt = `Extract restaurant search params. Today: ${today}, hour: ${currentHour}.
 ${location?.city ? `User is in ${location.city}, ${location.region}. Coords: ${location.lat}, ${location.lng}` : ""}
@@ -129,24 +131,24 @@ async function searchResy(params) {
       const venues = data?.results?.venues || [];
       console.log("Resy [1]:", venues.length, "venues");
       if (venues.length > 0) {
-        // Log first venue's fields to understand structure
-        const sample = venues[0]?.venue || venues[0];
-        console.log("Resy sample venue keys:", Object.keys(sample || {}).join(", "));
-        console.log("Resy sample location:", JSON.stringify(sample?.location || sample?.geo || {}).slice(0, 300));
+        // Log FULL first venue to understand the exact structure
+        const sample = venues[0];
+        console.log("Resy FULL venue[0]:", JSON.stringify(sample).slice(0, 1500));
 
         return venues.slice(0, 15).map((v) => {
           const venue = v.venue || v;
           const hasSlots = (v.slots?.length || 0) > 0;
-          const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+          const venueName = venue.name || "";
+          const encodedName = encodeURIComponent(venueName);
 
-          // Use the venue's own city for the Resy URL, not the search city
-          const venueCity = venue.location?.city || venue.city || params.city || "atlanta";
-          const venueState = venue.location?.state || venue.state || params.state || "ga";
-          const venueCitySlug = resyCitySlug(venueCity, venueState);
-          const venueName = encodeURIComponent(venue.name || "");
+          // Use Resy search URL — always works regardless of venue city
+          // Resy will resolve to the correct venue page from the query
+          const bookingUrl = `https://resy.com/cities/${citySlug}?query=${encodedName}&date=${params.date}&seats=${params.party_size}`;
+
+          console.log("Resy URL for", venueName, "→", bookingUrl.slice(0, 120));
 
           return {
-            name: venue.name || "",
+            name: venueName,
             cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
             price: venue.price_range ? "$".repeat(venue.price_range) : "",
             rating: venue.rating || null,
@@ -154,8 +156,8 @@ async function searchResy(params) {
             address: venue.neighborhood || venue.location?.neighborhood || "",
             platform: "Resy",
             hasAvailability: hasSlots,
-            bookingUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}&query=${venueName}`,
-            profileUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}`,
+            bookingUrl,
+            profileUrl: bookingUrl,
           };
         }).filter(r => r.name && r.hasAvailability);
       }
@@ -189,14 +191,12 @@ async function searchResy(params) {
       console.log("Resy [2]:", venues.length, "venues");
       if (venues.length > 0) {
         return venues.slice(0, 15).map((venue) => {
-          const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
           const available = venue.available !== false && venue.notify_available !== true;
-          const venueCity = venue.location?.city || venue.city || params.city || "atlanta";
-          const venueState = venue.location?.state || venue.state || params.state || "ga";
-          const venueCitySlug = resyCitySlug(venueCity, venueState);
-          const venueName = encodeURIComponent(venue.name || "");
+          const venueName = venue.name || "";
+          const encodedName = encodeURIComponent(venueName);
+          const bookingUrl = `https://resy.com/cities/${citySlug}?query=${encodedName}&date=${params.date}&seats=${params.party_size}`;
           return {
-            name: venue.name || "",
+            name: venueName,
             cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
             price: venue.price_range ? "$".repeat(venue.price_range) : "",
             rating: venue.rating || venue.score || null,
@@ -204,8 +204,8 @@ async function searchResy(params) {
             address: venue.location?.neighborhood || venue.neighborhood || "",
             platform: "Resy",
             hasAvailability: available,
-            bookingUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}&query=${venueName}`,
-            profileUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}`,
+            bookingUrl,
+            profileUrl: bookingUrl,
           };
         }).filter(r => r.name && r.hasAvailability);
       }
@@ -346,11 +346,12 @@ export async function POST(req) {
   if (!GEMINI_KEY) return Response.json({ error: "GEMINI_API_KEY not configured" }, { status: 500 });
 
   try {
-    const { messages, location } = await req.json();
+    const { messages, location, localDate, localTime, localHour } = await req.json();
     const lastMessage = messages?.filter((m) => m.role === "user").pop()?.content || "";
     if (!lastMessage) return Response.json({ error: "No message" }, { status: 400 });
 
-    const params = await parseQuery(lastMessage, location);
+    const clientTime = { localDate, localTime, localHour };
+    const params = await parseQuery(lastMessage, location, clientTime);
 
     // Cache
     const key = `${params.query}|${params.date}|${params.time}|${params.party_size}|${Math.round((params.lat||0)*100)}`.toLowerCase();
