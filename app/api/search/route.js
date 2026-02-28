@@ -362,77 +362,99 @@ function haversine(lat1, lon1, lat2, lon2) {
 // ============================================================
 
 async function searchYelp(params) {
-  if (!YELP_API_KEY) {
-    console.log("Yelp: YELP_API_KEY not set — skipping");
-    return [];
-  }
+  // Use Gemini with Google Search grounding to find restaurants with REAL available reservations
+  // This searches the actual web — Google indexes live availability from Yelp, OpenTable, Resy, etc.
+  if (!GEMINI_KEY) return [];
 
   try {
-    const yelpCategoryMap = {
-      mexican: "mexican", italian: "italian", japanese: "japanese", sushi: "sushi",
-      chinese: "chinese", thai: "thai", indian: "indpak", french: "french",
-      korean: "korean", mediterranean: "mediterranean", american: "newamerican",
-      steakhouse: "steak", steak: "steak", seafood: "seafood", brunch: "breakfast_brunch",
-      breakfast: "breakfast_brunch", bbq: "bbq", barbeque: "bbq", pizza: "pizza",
-      vietnamese: "vietnamese", greek: "greek", spanish: "spanish", tapas: "tapas",
-      ethiopian: "ethiopian", turkish: "turkish", peruvian: "peruvian",
-      caribbean: "caribbean", cuban: "cuban", german: "german", ramen: "ramen",
-      soul: "soulfood", southern: "soulfood", vegan: "vegan", vegetarian: "vegetarian",
-    };
+    const city = params.city || "Atlanta";
+    const state = params.state || "GA";
+    const cuisine = params.query || params.cuisine || "";
+    const date = params.date || "";
+    const time = params.time || "19:00";
+    const party = params.party_size || 2;
 
-    const queryLower = (params.query || params.cuisine || "").toLowerCase().trim();
-    const yelpCategory = yelpCategoryMap[queryLower] || null;
+    const prompt = `Search for ${cuisine || "restaurants"} in ${city}, ${state} that have available reservations on ${date} at ${time} for ${party} people.
 
-    const url = new URL("https://api.yelp.com/v3/businesses/search");
-    url.searchParams.set("latitude", (params.lat || 33.749).toString());
-    url.searchParams.set("longitude", (params.lng || -84.388).toString());
-    url.searchParams.set("categories", yelpCategory || "restaurants");
-    url.searchParams.set("limit", "10");
-    url.searchParams.set("sort_by", "distance");
-    url.searchParams.set("radius", "12875");
-    if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
-    url.searchParams.set("attributes", "reservation");
+IMPORTANT: Only include restaurants that ACTUALLY have open reservation slots for this specific date and time. Do not include restaurants that are closed, fully booked, or don't take online reservations.
 
-    console.log("Yelp: category=" + (yelpCategory || "restaurants"), "term=" + (url.searchParams.get("term") || "(none)"));
+Search Yelp, OpenTable, Resy, and Google for real availability.
+
+Return ONLY a JSON array, no other text. Each object must have:
+{"name":"","cuisine":"","price":"","rating":null,"address":"","bookingUrl":"","platform":"","distance":""}
+
+- bookingUrl: the actual reservation URL (yelp.com/reservations/..., opentable.com/..., resy.com/..., etc.)
+- platform: which platform has the reservation (Yelp, OpenTable, Resy, Google)
+- price: use $ signs (e.g. "$$")
+- rating: number or null
+- Return up to 8 restaurants. Return [] if none found.
+- Do NOT include any markdown, code fences, or explanation. ONLY the JSON array.`;
+
+    console.log("Gemini Search: looking for", cuisine || "restaurants", "in", city, "on", date, time);
 
     const res = await withTimeout(
-      fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${YELP_API_KEY}`, Accept: "application/json" },
+      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          tools: [{ google_search: {} }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 2000 },
+        }),
       }),
-      8000
+      15000
     );
 
-    console.log("Yelp status:", res.status);
     if (!res.ok) {
       const err = await res.text().catch(() => "");
-      console.error("Yelp error:", res.status, err.slice(0, 500));
+      console.error("Gemini Search error:", res.status, err.slice(0, 300));
       return [];
     }
 
     const data = await res.json();
-    const yelpTime = (params?.time || "19:00").replace(":", "");
-    const results = (data.businesses || [])
-      .filter(biz => biz.transactions?.includes("restaurant_reservation"))
-      .slice(0, 10)
-      .map(biz => ({
-        name: biz.name || "",
-        cuisine: biz.categories?.map(c => c.title).join(", ") || "",
-        price: biz.price || "",
-        rating: biz.rating || null,
-        reviewCount: biz.review_count || null,
-        address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
-        platform: "Yelp",
-        hasAvailability: true,
-        bookingUrl: `https://www.yelp.com/reservations/${biz.alias}?date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`,
-        profileUrl: `https://www.yelp.com/biz/${biz.alias}`,
-        distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
-        distanceMeters: biz.distance || null,
-      }));
+    const text = data?.candidates?.[0]?.content?.parts
+      ?.map(p => p.text || "").join("") || "";
 
-    console.log("Yelp:", data.businesses?.length, "total,", results.length, "with reservations");
-    return results;
+    console.log("Gemini Search raw:", text.slice(0, 500));
+
+    // Log grounding metadata
+    const grounding = data?.candidates?.[0]?.groundingMetadata;
+    if (grounding?.webSearchQueries) {
+      console.log("Gemini Search queries:", grounding.webSearchQueries.join(", "));
+    }
+
+    // Parse JSON from response — strip markdown fences if present
+    const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+    let restaurants;
+    try { restaurants = JSON.parse(cleaned); } catch {
+      // Try to find JSON array in the text
+      const match = cleaned.match(/\[[\s\S]*\]/);
+      if (match) {
+        try { restaurants = JSON.parse(match[0]); } catch { restaurants = []; }
+      } else {
+        restaurants = [];
+      }
+    }
+
+    if (!Array.isArray(restaurants)) restaurants = [];
+    console.log("Gemini Search: found", restaurants.length, "restaurants");
+
+    return restaurants.slice(0, 8).map(r => ({
+      name: r.name || "",
+      cuisine: r.cuisine || "",
+      price: r.price || "",
+      rating: r.rating || null,
+      reviewCount: null,
+      address: r.address || "",
+      platform: r.platform || "Web",
+      hasAvailability: true,
+      bookingUrl: r.bookingUrl || r.booking_url || r.url || "",
+      profileUrl: r.bookingUrl || r.booking_url || r.url || "",
+      distance: r.distance || "",
+      distanceMeters: null,
+    })).filter(r => r.name && r.bookingUrl);
   } catch (e) {
-    console.error("Yelp error:", e.message);
+    console.error("Gemini Search error:", e.message);
     return [];
   }
 }
@@ -493,8 +515,10 @@ export async function POST(req) {
     const MAX_DISTANCE = 12875;
     const withinRange = allResults.filter(r => r.distanceMeters == null || r.distanceMeters <= MAX_DISTANCE);
 
-    // Sort by distance (closest first), unknown distance at end
+    // Sort: Resy first (confirmed availability), then Yelp. Within each, by distance.
     withinRange.sort((a, b) => {
+      if (a.platform === "Resy" && b.platform !== "Resy") return -1;
+      if (a.platform !== "Resy" && b.platform === "Resy") return 1;
       const da = a.distanceMeters ?? 999999;
       const db = b.distanceMeters ?? 999999;
       return da - db;
@@ -505,20 +529,16 @@ export async function POST(req) {
       searchParams: params,
       restaurants: withinRange,
       resultCount: withinRange.length,
-      platformsSearched: ["Resy", ...(YELP_API_KEY ? ["Yelp"] : [])],
+      platformsSearched: [...new Set(["Resy", ...withinRange.map(r => r.platform)])],
       elapsed,
     };
 
     let reply;
     if (withinRange.length === 0) {
-      reply = `No restaurants with available reservations found for "${params.query || "your search"}" within 8 miles on ${params.date}. Try a different cuisine, date, or larger search area.`;
+      reply = `No restaurants with available reservations found for "${params.query || "your search"}" within 8 miles on ${params.date}. Try a different cuisine, date, or time.`;
     } else {
-      const rc = withinRange.filter(r => r.platform === "Resy").length;
-      const yc = withinRange.filter(r => r.platform === "Yelp").length;
-      const parts = [];
-      if (rc > 0) parts.push(`${rc} from Resy`);
-      if (yc > 0) parts.push(`${yc} from Yelp`);
-      reply = `Found ${withinRange.length} restaurants with available reservations (${parts.join(", ")}).`;
+      const platforms = [...new Set(withinRange.map(r => r.platform))];
+      reply = `Found ${withinRange.length} restaurants with available reservations (via ${platforms.join(", ")}).`;
     }
 
     const responseData = { reply, structured, searchParams: params };
