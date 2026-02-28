@@ -51,8 +51,7 @@ function BookingButton({ restaurant }) {
   const isResy = restaurant.platform === "Resy";
   const color = isResy ? { bg: "rgba(72,128,255,0.12)", border: "rgba(72,128,255,0.35)", text: "#4880FF", hover: "rgba(72,128,255,0.22)" }
     : { bg: "rgba(196,18,0,0.10)", border: "rgba(196,18,0,0.30)", text: "#C41200", hover: "rgba(196,18,0,0.18)" };
-  const label = isResy ? "Reserve on Resy →"
-    : restaurant.availabilityVerified === false ? "Check on Yelp →" : "Reserve on Yelp →";
+  const label = isResy ? "Reserve on Resy →" : "Reserve on Yelp →";
 
   return (
     <a href={restaurant.bookingUrl} target="_blank" rel="noopener noreferrer"
@@ -91,13 +90,7 @@ function RestaurantCard({ restaurant }) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
         <BookingButton restaurant={restaurant} />
-        {restaurant.availabilityVerified === false ? (
-          <span style={{ fontSize: 12, color: "#E8A86D", fontWeight: 500 }}>Check availability →</span>
-        ) : (
-          <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>
-            ✓ Available{restaurant.availableSlots ? ` (${restaurant.availableSlots} slots)` : ""}
-          </span>
-        )}
+        <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
         {restaurant.distance && <span style={{ fontSize: 12, color: "#6A5E50" }}>{safe(restaurant.distance)}</span>}
       </div>
     </div>
