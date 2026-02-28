@@ -211,6 +211,7 @@ async function resyVenueSearch(params, headers, citySlug) {
 
             let venueCity = params.city || "atlanta";
             let venueState = params.state || "ga";
+            let distanceMeters = null;
             try {
               if (venueId) {
                 const detailRes = await withTimeout(
@@ -222,6 +223,11 @@ async function resyVenueSearch(params, headers, citySlug) {
                   const loc = detail?.location || detail?.venue?.location || {};
                   venueCity = loc.city || loc.locality || venueCity;
                   venueState = loc.state || loc.region || venueState;
+                  const vLat = loc.latitude || loc.lat;
+                  const vLng = loc.longitude || loc.lng || loc.long;
+                  if (vLat && vLng && params.lat && params.lng) {
+                    distanceMeters = haversine(params.lat, params.lng, vLat, vLng);
+                  }
                 }
               }
             } catch {}
@@ -239,6 +245,8 @@ async function resyVenueSearch(params, headers, citySlug) {
               hasAvailability: available,
               bookingUrl,
               profileUrl: bookingUrl,
+              distanceMeters,
+              distance: distanceMeters ? `${(distanceMeters / 1609.34).toFixed(1)} mi` : "",
             };
           })
         );
@@ -262,6 +270,7 @@ async function enrichResyVenue(v, params, headers, citySlug) {
 
   let venueCity = params.city || "atlanta";
   let venueState = params.state || "ga";
+  let distanceMeters = null;
   try {
     if (venueId) {
       const detailRes = await withTimeout(
@@ -273,6 +282,12 @@ async function enrichResyVenue(v, params, headers, citySlug) {
         const loc = detail?.location || detail?.venue?.location || {};
         venueCity = loc.city || loc.locality || venueCity;
         venueState = loc.state || loc.region || venueState;
+        // Calculate distance if we have coordinates
+        const vLat = loc.latitude || loc.lat;
+        const vLng = loc.longitude || loc.lng || loc.long;
+        if (vLat && vLng && params.lat && params.lng) {
+          distanceMeters = haversine(params.lat, params.lng, vLat, vLng);
+        }
       }
     }
   } catch {}
@@ -291,7 +306,19 @@ async function enrichResyVenue(v, params, headers, citySlug) {
     hasAvailability: hasSlots,
     bookingUrl,
     profileUrl: bookingUrl,
+    distanceMeters,
+    distance: distanceMeters ? `${(distanceMeters / 1609.34).toFixed(1)} mi` : "",
   };
+}
+
+// Haversine formula — returns distance in meters
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 // ============================================================
@@ -305,7 +332,6 @@ async function searchYelp(params) {
   }
 
   try {
-    // Map common cuisine terms to Yelp category aliases
     const yelpCategoryMap = {
       mexican: "mexican", italian: "italian", japanese: "japanese", sushi: "sushi",
       chinese: "chinese", thai: "thai", indian: "indpak", french: "french",
@@ -324,15 +350,18 @@ async function searchYelp(params) {
     const url = new URL("https://api.yelp.com/v3/businesses/search");
     url.searchParams.set("latitude", (params.lat || 33.749).toString());
     url.searchParams.set("longitude", (params.lng || -84.388).toString());
-    // Use specific category if we have one, otherwise fall back to generic restaurants
     url.searchParams.set("categories", yelpCategory || "restaurants");
     url.searchParams.set("limit", "20");
-    url.searchParams.set("sort_by", "best_match");
-    // Also pass term for extra relevance — Yelp searches name and content
+    url.searchParams.set("sort_by", "distance");
     if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
-    url.searchParams.set("attributes", "reservation");
 
-    console.log("Yelp: category=" + (yelpCategory || "restaurants"), "term=" + (url.searchParams.get("term") || "(none)"));
+    // Pass reservation params so Yelp only returns restaurants with ACTUAL availability
+    url.searchParams.set("reservation_date", params.date || "");
+    url.searchParams.set("reservation_time", params.time || "19:00");
+    url.searchParams.set("reservation_covers", (params.party_size || 2).toString());
+
+    console.log("Yelp: category=" + (yelpCategory || "restaurants"),
+      "date=" + params.date, "time=" + params.time, "covers=" + params.party_size);
 
     const res = await withTimeout(
       fetch(url.toString(), {
@@ -350,10 +379,13 @@ async function searchYelp(params) {
       const err = await res.text().catch(() => "");
       console.error("Yelp error:", res.status, err.slice(0, 500));
 
-      // If reservation filter fails, try without it
-      if (res.status === 400) {
-        console.log("Yelp: retrying without reservation filter");
-        url.searchParams.delete("attributes");
+      // If reservation params fail, fall back to attributes=reservation
+      if (res.status === 400 || res.status === 401) {
+        console.log("Yelp: retrying with attributes=reservation fallback");
+        url.searchParams.delete("reservation_date");
+        url.searchParams.delete("reservation_time");
+        url.searchParams.delete("reservation_covers");
+        url.searchParams.set("attributes", "reservation");
         const retry = await withTimeout(
           fetch(url.toString(), {
             headers: { Authorization: `Bearer ${YELP_API_KEY}`, Accept: "application/json" },
@@ -362,11 +394,12 @@ async function searchYelp(params) {
         );
         if (retry.ok) {
           const data = await retry.json();
-          console.log("Yelp retry:", data.businesses?.length || 0, "businesses");
+          console.log("Yelp fallback:", data.businesses?.length || 0, "businesses");
+          // Fallback mode: flag these as unverified availability
           return mapYelpResults(data.businesses || [], true, params);
         } else {
           const retryErr = await retry.text().catch(() => "");
-          console.error("Yelp retry error:", retry.status, retryErr.slice(0, 300));
+          console.error("Yelp fallback error:", retry.status, retryErr.slice(0, 300));
         }
       }
       return [];
@@ -374,6 +407,13 @@ async function searchYelp(params) {
 
     const data = await res.json();
     console.log("Yelp:", data.businesses?.length || 0, "businesses");
+    // Log first result to see if reservation_openings are included
+    if (data.businesses?.[0]) {
+      console.log("Yelp biz[0] keys:", Object.keys(data.businesses[0]).join(", "));
+      if (data.businesses[0].reservation_openings) {
+        console.log("Yelp biz[0] openings:", JSON.stringify(data.businesses[0].reservation_openings).slice(0, 300));
+      }
+    }
     return mapYelpResults(data.businesses || [], false, params);
   } catch (e) {
     console.error("Yelp error:", e.message);
@@ -381,19 +421,28 @@ async function searchYelp(params) {
   }
 }
 
-function mapYelpResults(businesses, wasRetry, params) {
-  // Convert time "19:00" to "1900" format for Yelp
+function mapYelpResults(businesses, wasFallback, params) {
   const yelpTime = (params?.time || "19:00").replace(":", "");
 
   return businesses.slice(0, 10).map((biz) => {
-    const hasReservation = biz.transactions?.includes("restaurant_reservation");
     const alias = biz.alias || "";
-    // Profile page
     const profileUrl = `https://www.yelp.com/biz/${alias}`;
-    // Reservation page with date/time/covers pre-filled
-    const bookingUrl = hasReservation
-      ? `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`
-      : profileUrl;
+
+    // If we got reservation_openings from the real reservation params, use those
+    const openings = biz.reservation_openings || [];
+    const hasRealOpenings = openings.length > 0;
+
+    // If this came from the real reservation search (not fallback), the restaurant
+    // was returned because it has availability — trust it
+    const hasAvailability = !wasFallback || hasRealOpenings || biz.transactions?.includes("restaurant_reservation");
+
+    // Build booking URL — use first opening URL if available, otherwise construct
+    let bookingUrl;
+    if (hasRealOpenings && openings[0]?.url) {
+      bookingUrl = openings[0].url;
+    } else {
+      bookingUrl = `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
+    }
 
     return {
       name: biz.name || "",
@@ -403,10 +452,13 @@ function mapYelpResults(businesses, wasRetry, params) {
       reviewCount: biz.review_count || null,
       address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
       platform: "Yelp",
-      hasAvailability: hasReservation,
+      hasAvailability,
+      // If fallback mode, flag it so UI can show different label
+      availabilityVerified: !wasFallback,
       bookingUrl,
       profileUrl,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
+      distanceMeters: biz.distance || null,
     };
   }).filter(r => r.name && r.hasAvailability);
 }
@@ -463,16 +515,12 @@ export async function POST(req) {
       if (!names.has(y.name.toLowerCase().replace(/[^a-z]/g, ""))) allResults.push(y);
     }
 
-    // Sort: weighted score = rating * log(reviewCount + 1)
-    // A 4.5 with 500 reviews beats a 5.0 with 3 reviews
-    // Resy results get a small boost since they have direct booking
-    const score = (r) => {
-      const rating = Number(r.rating) || 0;
-      const reviews = Number(r.reviewCount) || 0;
-      const platformBoost = r.platform === "Resy" ? 0.3 : 0;
-      return (rating + platformBoost) * Math.log10(reviews + 2);
-    };
-    allResults.sort((a, b) => score(b) - score(a));
+    // Sort by distance (closest first), unknown distance at end
+    allResults.sort((a, b) => {
+      const da = a.distanceMeters ?? 999999;
+      const db = b.distanceMeters ?? 999999;
+      return da - db;
+    });
 
     const structured = {
       type: "results",
