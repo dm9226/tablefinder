@@ -119,78 +119,65 @@ async function searchResy(params) {
     Referer: "https://resy.com/",
   };
   const citySlug = resyCitySlug(params.city, params.state);
-  console.log("Resy city slug:", citySlug);
+  const hasCuisineQuery = !!(params.query || params.cuisine);
+  console.log("Resy city slug:", citySlug, "cuisine query:", params.query || "(none)");
 
-  // Approach 1: GET /4/find
+  // If user specified a cuisine, try venuesearch FIRST (it supports query filtering)
+  if (hasCuisineQuery) {
+    const venueSearchResults = await resyVenueSearch(params, headers, citySlug);
+    if (venueSearchResults.length > 0) return venueSearchResults;
+    console.log("Resy venuesearch returned 0, falling back to /4/find with filter");
+  }
+
+  // Approach: GET /4/find (returns everything nearby, we filter by cuisine)
   try {
     const url = `https://api.resy.com/4/find?lat=${params.lat || 33.749}&long=${params.lng || -84.388}&day=${params.date}&party_size=${params.party_size}`;
-    console.log("Resy [1] GET /4/find");
+    console.log("Resy GET /4/find");
     const res = await withTimeout(fetch(url, { headers }), 8000);
     if (res.ok) {
       const data = await res.json();
       const venues = data?.results?.venues || [];
-      console.log("Resy [1]:", venues.length, "venues");
+      console.log("Resy /4/find:", venues.length, "venues");
       if (venues.length > 0) {
-        // Log first venue structure
-        console.log("Resy venue[0]:", JSON.stringify(venues[0]).slice(0, 1500));
+        console.log("Resy venue[0]:", JSON.stringify(venues[0]).slice(0, 800));
 
-        // For each venue, get full details (including city) via /3/venue endpoint in parallel
+        // Filter by cuisine if query specified
+        const queryLower = (params.query || params.cuisine || "").toLowerCase();
+        const filtered = queryLower
+          ? venues.filter(v => {
+              const venue = v.venue || v;
+              const type = (venue.type || "").toLowerCase();
+              const cuisine = Array.isArray(venue.cuisine) ? venue.cuisine.join(" ").toLowerCase() : (venue.cuisine || "").toLowerCase();
+              const name = (venue.name || "").toLowerCase();
+              return type.includes(queryLower) || cuisine.includes(queryLower) || name.includes(queryLower);
+            })
+          : venues;
+
+        console.log("Resy after cuisine filter:", filtered.length, "of", venues.length);
+
         const enriched = await Promise.all(
-          venues.slice(0, 10).map(async (v) => {
-            const venue = v.venue || v;
-            const hasSlots = (v.slots?.length || 0) > 0;
-            if (!hasSlots) return null;
-
-            const venueId = venue.id?.resy || venue.id;
-            const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
-            // Try to get full venue details for correct city
-            let venueCity = params.city || "atlanta";
-            let venueState = params.state || "ga";
-            try {
-              if (venueId) {
-                const detailRes = await withTimeout(
-                  fetch(`https://api.resy.com/3/venue?id=${venueId}&url_slug=${slug}`, { headers }),
-                  3000
-                );
-                if (detailRes.ok) {
-                  const detail = await detailRes.json();
-                  const loc = detail?.location || detail?.venue?.location || {};
-                  venueCity = loc.city || loc.locality || venueCity;
-                  venueState = loc.state || loc.region || venueState;
-                  console.log(`Resy venue ${venue.name}: city=${venueCity}, state=${venueState}`);
-                }
-              }
-            } catch (e) {
-              // Use fallback city — not critical
-            }
-
-            const venueCitySlug = resyCitySlug(venueCity, venueState);
-            const bookingUrl = `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`;
-
-            return {
-              name: venue.name || "",
-              cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
-              price: venue.price_range ? "$".repeat(venue.price_range) : "",
-              rating: venue.rating || null,
-              reviewCount: venue.num_ratings || null,
-              address: venue.neighborhood || venue.location?.neighborhood || "",
-              platform: "Resy",
-              hasAvailability: hasSlots,
-              bookingUrl,
-              profileUrl: bookingUrl,
-            };
-          })
+          filtered.slice(0, 10).map(v => enrichResyVenue(v, params, headers, citySlug))
         );
-        return enriched.filter(Boolean);
+        const results = enriched.filter(Boolean);
+        if (results.length > 0) return results;
       }
     } else {
       const err = await res.text().catch(() => "");
-      console.error("Resy [1]", res.status, err.slice(0, 500));
+      console.error("Resy /4/find", res.status, err.slice(0, 500));
     }
-  } catch (e) { console.error("Resy [1] error:", e.message); }
+  } catch (e) { console.error("Resy /4/find error:", e.message); }
 
-  // Approach 2: POST venuesearch
+  // If no cuisine query and venuesearch not tried yet, try it now
+  if (!hasCuisineQuery) {
+    const venueSearchResults = await resyVenueSearch(params, headers, citySlug);
+    if (venueSearchResults.length > 0) return venueSearchResults;
+  }
+
+  console.log("Resy: all approaches returned 0");
+  return [];
+}
+
+async function resyVenueSearch(params, headers, citySlug) {
   try {
     const body = {
       geo: { latitude: params.lat || 33.749, longitude: params.lng || -84.388 },
@@ -198,8 +185,9 @@ async function searchResy(params) {
       slot_filter: { day: params.date, party_size: params.party_size },
       types: ["venue"],
     };
-    if (params.query) body.query = params.query;
-    console.log("Resy [2] POST venuesearch");
+    if (params.query || params.cuisine) body.query = params.query || params.cuisine;
+    console.log("Resy venuesearch:", body.query || "(no query)");
+
     const res = await withTimeout(
       fetch("https://api.resy.com/3/venuesearch/search", {
         method: "POST",
@@ -211,7 +199,7 @@ async function searchResy(params) {
     if (res.ok) {
       const data = await res.json();
       const venues = data?.search?.hits || data?.results || [];
-      console.log("Resy [2]:", venues.length, "venues");
+      console.log("Resy venuesearch:", venues.length, "venues");
       if (venues.length > 0) {
         const enriched = await Promise.all(
           venues.slice(0, 10).map(async (venue) => {
@@ -258,12 +246,52 @@ async function searchResy(params) {
       }
     } else {
       const err = await res.text().catch(() => "");
-      console.error("Resy [2]", res.status, err.slice(0, 500));
+      console.error("Resy venuesearch", res.status, err.slice(0, 500));
     }
-  } catch (e) { console.error("Resy [2] error:", e.message); }
-
-  console.log("Resy: all approaches failed");
+  } catch (e) { console.error("Resy venuesearch error:", e.message); }
   return [];
+}
+
+async function enrichResyVenue(v, params, headers, citySlug) {
+  const venue = v.venue || v;
+  const hasSlots = (v.slots?.length || 0) > 0;
+  if (!hasSlots) return null;
+
+  const venueId = venue.id?.resy || venue.id;
+  const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+  let venueCity = params.city || "atlanta";
+  let venueState = params.state || "ga";
+  try {
+    if (venueId) {
+      const detailRes = await withTimeout(
+        fetch(`https://api.resy.com/3/venue?id=${venueId}&url_slug=${slug}`, { headers }),
+        3000
+      );
+      if (detailRes.ok) {
+        const detail = await detailRes.json();
+        const loc = detail?.location || detail?.venue?.location || {};
+        venueCity = loc.city || loc.locality || venueCity;
+        venueState = loc.state || loc.region || venueState;
+      }
+    }
+  } catch {}
+
+  const venueCitySlug = resyCitySlug(venueCity, venueState);
+  const bookingUrl = `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`;
+
+  return {
+    name: venue.name || "",
+    cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
+    price: venue.price_range ? "$".repeat(venue.price_range) : "",
+    rating: venue.rating || null,
+    reviewCount: venue.num_ratings || null,
+    address: venue.neighborhood || venue.location?.neighborhood || "",
+    platform: "Resy",
+    hasAvailability: hasSlots,
+    bookingUrl,
+    profileUrl: bookingUrl,
+  };
 }
 
 // ============================================================
@@ -277,19 +305,34 @@ async function searchYelp(params) {
   }
 
   try {
-    // Simple search — no open_at filter which can cause errors
+    // Map common cuisine terms to Yelp category aliases
+    const yelpCategoryMap = {
+      mexican: "mexican", italian: "italian", japanese: "japanese", sushi: "sushi",
+      chinese: "chinese", thai: "thai", indian: "indpak", french: "french",
+      korean: "korean", mediterranean: "mediterranean", american: "newamerican",
+      steakhouse: "steak", steak: "steak", seafood: "seafood", brunch: "breakfast_brunch",
+      breakfast: "breakfast_brunch", bbq: "bbq", barbeque: "bbq", pizza: "pizza",
+      vietnamese: "vietnamese", greek: "greek", spanish: "spanish", tapas: "tapas",
+      ethiopian: "ethiopian", turkish: "turkish", peruvian: "peruvian",
+      caribbean: "caribbean", cuban: "cuban", german: "german", ramen: "ramen",
+      soul: "soulfood", southern: "soulfood", vegan: "vegan", vegetarian: "vegetarian",
+    };
+
+    const queryLower = (params.query || params.cuisine || "").toLowerCase().trim();
+    const yelpCategory = yelpCategoryMap[queryLower] || null;
+
     const url = new URL("https://api.yelp.com/v3/businesses/search");
     url.searchParams.set("latitude", (params.lat || 33.749).toString());
     url.searchParams.set("longitude", (params.lng || -84.388).toString());
-    url.searchParams.set("categories", "restaurants");
+    // Use specific category if we have one, otherwise fall back to generic restaurants
+    url.searchParams.set("categories", yelpCategory || "restaurants");
     url.searchParams.set("limit", "20");
     url.searchParams.set("sort_by", "best_match");
-    // Only include term if we have a cuisine query
-    if (params.query) url.searchParams.set("term", params.query);
-    // Filter to only restaurants that accept reservations
+    // Also pass term for extra relevance — Yelp searches name and content
+    if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
     url.searchParams.set("attributes", "reservation");
 
-    console.log("Yelp: searching", url.searchParams.get("term") || "(all)", "with reservation attribute");
+    console.log("Yelp: category=" + (yelpCategory || "restaurants"), "term=" + (url.searchParams.get("term") || "(none)"));
 
     const res = await withTimeout(
       fetch(url.toString(), {
@@ -420,8 +463,16 @@ export async function POST(req) {
       if (!names.has(y.name.toLowerCase().replace(/[^a-z]/g, ""))) allResults.push(y);
     }
 
-    // Sort by rating
-    allResults.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+    // Sort: weighted score = rating * log(reviewCount + 1)
+    // A 4.5 with 500 reviews beats a 5.0 with 3 reviews
+    // Resy results get a small boost since they have direct booking
+    const score = (r) => {
+      const rating = Number(r.rating) || 0;
+      const reviews = Number(r.reviewCount) || 0;
+      const platformBoost = r.platform === "Resy" ? 0.3 : 0;
+      return (rating + platformBoost) * Math.log10(reviews + 2);
+    };
+    allResults.sort((a, b) => score(b) - score(a));
 
     const structured = {
       type: "results",
