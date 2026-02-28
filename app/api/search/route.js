@@ -367,70 +367,160 @@ async function searchYelp(params) {
     return [];
   }
 
+  const yelpCategoryMap = {
+    mexican: "mexican", italian: "italian", japanese: "japanese", sushi: "sushi",
+    chinese: "chinese", thai: "thai", indian: "indpak", french: "french",
+    korean: "korean", mediterranean: "mediterranean", american: "newamerican",
+    steakhouse: "steak", steak: "steak", seafood: "seafood", brunch: "breakfast_brunch",
+    breakfast: "breakfast_brunch", bbq: "bbq", barbeque: "bbq", pizza: "pizza",
+    vietnamese: "vietnamese", greek: "greek", spanish: "spanish", tapas: "tapas",
+    ethiopian: "ethiopian", turkish: "turkish", peruvian: "peruvian",
+    caribbean: "caribbean", cuban: "cuban", german: "german", ramen: "ramen",
+    soul: "soulfood", southern: "soulfood", vegan: "vegan", vegetarian: "vegetarian",
+  };
+  const queryLower = (params.query || params.cuisine || "").toLowerCase().trim();
+  const yelpCategory = yelpCategoryMap[queryLower] || null;
+
+  // APPROACH 1: Scrape yelp.com/search/snippet — the JSON endpoint Yelp's own frontend uses
   try {
-    const yelpCategoryMap = {
-      mexican: "mexican", italian: "italian", japanese: "japanese", sushi: "sushi",
-      chinese: "chinese", thai: "thai", indian: "indpak", french: "french",
-      korean: "korean", mediterranean: "mediterranean", american: "newamerican",
-      steakhouse: "steak", steak: "steak", seafood: "seafood", brunch: "breakfast_brunch",
-      breakfast: "breakfast_brunch", bbq: "bbq", barbeque: "bbq", pizza: "pizza",
-      vietnamese: "vietnamese", greek: "greek", spanish: "spanish", tapas: "tapas",
-      ethiopian: "ethiopian", turkish: "turkish", peruvian: "peruvian",
-      caribbean: "caribbean", cuban: "cuban", german: "german", ramen: "ramen",
-      soul: "soulfood", southern: "soulfood", vegan: "vegan", vegetarian: "vegetarian",
-    };
+    const loc = params.city ? `${params.city}, ${params.state || "GA"}` : "Atlanta, GA";
+    const snippetUrl = new URL("https://www.yelp.com/search/snippet");
+    snippetUrl.searchParams.set("find_desc", queryLower || "restaurants");
+    snippetUrl.searchParams.set("find_loc", loc);
+    snippetUrl.searchParams.set("ns", "1");
+    snippetUrl.searchParams.set("attrs", "Reservations");
+    snippetUrl.searchParams.set("request_origin", "user");
+    if (params.date) snippetUrl.searchParams.set("reservation_date", params.date);
+    if (params.time) snippetUrl.searchParams.set("reservation_time", params.time);
+    if (params.party_size) snippetUrl.searchParams.set("reservation_covers", params.party_size.toString());
 
-    const queryLower = (params.query || params.cuisine || "").toLowerCase().trim();
-    const yelpCategory = yelpCategoryMap[queryLower] || null;
-
-    const url = new URL("https://api.yelp.com/v3/businesses/search");
-    url.searchParams.set("latitude", (params.lat || 33.749).toString());
-    url.searchParams.set("longitude", (params.lng || -84.388).toString());
-    url.searchParams.set("categories", yelpCategory || "restaurants");
-    url.searchParams.set("limit", "20");
-    url.searchParams.set("sort_by", "distance");
-    url.searchParams.set("radius", "12875");
-    if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
-    url.searchParams.set("attributes", "reservation");
-
-    console.log("Yelp: category=" + (yelpCategory || "restaurants"), "term=" + (url.searchParams.get("term") || "(none)"));
-
-    const res = await withTimeout(
-      fetch(url.toString(), {
+    console.log("Yelp snippet:", snippetUrl.toString());
+    const snippetRes = await withTimeout(
+      fetch(snippetUrl.toString(), {
         headers: {
-          Authorization: `Bearer ${YELP_API_KEY}`,
-          Accept: "application/json",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Accept": "application/json, text/html",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Referer": "https://www.yelp.com/search?find_desc=restaurants&find_loc=" + encodeURIComponent(loc),
+          "Cookie": "intl_splash=false",
         },
       }),
       8000
     );
 
-    console.log("Yelp status:", res.status);
+    console.log("Yelp snippet status:", snippetRes.status);
+    if (snippetRes.ok) {
+      const text = await snippetRes.text();
+      console.log("Yelp snippet length:", text.length);
 
-    if (!res.ok) {
-      const err = await res.text().catch(() => "");
-      console.error("Yelp error:", res.status, err.slice(0, 500));
-      return [];
+      // Try parsing as JSON first (the snippet endpoint returns JSON)
+      let snippetData;
+      try { snippetData = JSON.parse(text); } catch {}
+
+      if (snippetData) {
+        console.log("Yelp snippet keys:", Object.keys(snippetData).slice(0, 10).join(", "));
+        // Log deeper structure to understand the shape
+        const deep = JSON.stringify(snippetData).slice(0, 1000);
+        console.log("Yelp snippet sample:", deep);
+        const results = parseYelpSnippet(snippetData, params);
+        if (results.length > 0) {
+          console.log("Yelp snippet parsed:", results.length, "results");
+          return results;
+        }
+      } else {
+        // Got HTML — check for embedded JSON in script tags
+        const scriptMatch = text.match(/<script[^>]*data-id="react-root-props"[^>]*>([\s\S]*?)<\/script>/);
+        if (scriptMatch) {
+          try {
+            const rootProps = scriptMatch[1];
+            const jsonStr = rootProps.includes("react_root_props")
+              ? rootProps.split("react_root_props = ")[1]?.split(";")[0]
+              : rootProps;
+            const embedded = JSON.parse(jsonStr);
+            console.log("Yelp embedded keys:", Object.keys(embedded).slice(0, 10).join(", "));
+            const results = parseYelpSnippet(embedded, params);
+            if (results.length > 0) return results;
+          } catch (e) { console.log("Yelp embedded parse error:", e.message); }
+        }
+        console.log("Yelp snippet raw (500 chars):", text.slice(0, 500));
+      }
     }
+  } catch (e) { console.log("Yelp snippet error:", e.message); }
+
+  // APPROACH 2: API to get candidates, then scrape each reservation page
+  try {
+    console.log("Yelp: falling back to API + page scrape");
+    const url = new URL("https://api.yelp.com/v3/businesses/search");
+    url.searchParams.set("latitude", (params.lat || 33.749).toString());
+    url.searchParams.set("longitude", (params.lng || -84.388).toString());
+    url.searchParams.set("categories", yelpCategory || "restaurants");
+    url.searchParams.set("limit", "10");
+    url.searchParams.set("sort_by", "distance");
+    url.searchParams.set("radius", "12875");
+    if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
+    url.searchParams.set("attributes", "reservation");
+
+    const res = await withTimeout(
+      fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${YELP_API_KEY}`, Accept: "application/json" },
+      }),
+      8000
+    );
+    if (!res.ok) { console.error("Yelp API:", res.status); return []; }
 
     const data = await res.json();
-    const candidates = (data.businesses || []).filter(
-      biz => biz.transactions?.includes("restaurant_reservation")
-    ).slice(0, 8);
-    console.log("Yelp:", data.businesses?.length || 0, "total,", candidates.length, "with reservations — checking actual availability");
+    const candidates = (data.businesses || [])
+      .filter(biz => biz.transactions?.includes("restaurant_reservation"))
+      .slice(0, 6);
+    console.log("Yelp API:", candidates.length, "candidates — scraping reservation pages");
 
-    // For each candidate, fetch the real Yelp reservation page and check for slots
     const verified = await Promise.all(
-      candidates.map(biz => checkYelpAvailability(biz, params))
+      candidates.map(biz => scrapeYelpReservationPage(biz, params))
     );
     return verified.filter(Boolean);
   } catch (e) {
-    console.error("Yelp error:", e.message);
+    console.error("Yelp fallback error:", e.message);
     return [];
   }
 }
 
-async function checkYelpAvailability(biz, params) {
+function parseYelpSnippet(data, params) {
+  const results = [];
+  const yelpTime = (params?.time || "19:00").replace(":", "");
+
+  // Navigate the snippet JSON — structure varies, try multiple paths
+  const components =
+    data?.searchPageProps?.mainContentComponentsListProps ||
+    data?.legacyProps?.searchAppProps?.searchPageProps?.mainContentComponentsListProps ||
+    data?.mainContentComponentsListProps ||
+    [];
+
+  for (const item of components) {
+    if (!item?.bizId && !item?.searchResultBusiness) continue;
+    const biz = item.searchResultBusiness || item;
+    const name = biz.name || biz.businessName || "";
+    if (!name) continue;
+
+    const alias = biz.alias || biz.businessUrl?.split("/biz/")[1]?.split("?")[0] || "";
+    results.push({
+      name,
+      cuisine: (biz.categories || []).map(c => c.title || c).join(", "),
+      price: biz.priceRange || biz.price || "",
+      rating: biz.rating || null,
+      reviewCount: biz.reviewCount || null,
+      address: biz.formattedAddress || biz.address || "",
+      platform: "Yelp",
+      hasAvailability: true,
+      bookingUrl: `https://www.yelp.com/reservations/${alias}?date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`,
+      profileUrl: `https://www.yelp.com/biz/${alias}`,
+      distanceMeters: null,
+      distance: "",
+    });
+  }
+  return results.slice(0, 10);
+}
+
+async function scrapeYelpReservationPage(biz, params) {
   const alias = biz.alias || "";
   const yelpTime = (params?.time || "19:00").replace(":", "");
   const reservationUrl = `https://www.yelp.com/reservations/${alias}?date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
@@ -439,51 +529,39 @@ async function checkYelpAvailability(biz, params) {
     const res = await withTimeout(
       fetch(reservationUrl, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
           "Accept": "text/html,application/xhtml+xml",
+          "Accept-Language": "en-US,en;q=0.9",
         },
       }),
       5000
     );
 
     if (!res.ok) {
-      console.log(`Yelp page ${biz.name}: ${res.status}`);
+      console.log(`Yelp page ${biz.name}: HTTP ${res.status}`);
       return null;
     }
 
     const html = await res.text();
+    console.log(`Yelp page ${biz.name}: ${html.length} bytes`);
 
-    // Check for signs of NO availability
-    const noAvailability =
-      html.includes("No availability") ||
-      html.includes("no times available") ||
-      html.includes("not available") ||
-      html.includes("no_availability") ||
-      html.includes("no-availability") ||
-      html.includes("currently not taking") ||
-      html.includes("not accepting reservations");
+    // Look for "no availability" signals
+    const htmlLower = html.toLowerCase();
+    const noAvail =
+      htmlLower.includes("no availability") ||
+      htmlLower.includes("no times available") ||
+      htmlLower.includes("not currently taking") ||
+      htmlLower.includes("no online reservations") ||
+      htmlLower.includes("not accepting online") ||
+      htmlLower.includes("no_availability");
 
-    // Check for signs of YES availability — time slot buttons/links
-    const hasSlots =
-      html.includes("reservation-time-slot") ||
-      html.includes("time-slot") ||
-      html.includes("timeslot") ||
-      html.includes("reservationTime") ||
-      html.includes("available-time") ||
-      html.includes("pick a time") ||
-      html.includes("Select a time") ||
-      html.includes("data-time=");
+    if (noAvail) {
+      console.log(`Yelp page ${biz.name}: NO AVAILABILITY`);
+      return null;
+    }
 
-    console.log(`Yelp page ${biz.name}: noAvail=${noAvailability}, hasSlots=${hasSlots}, htmlLen=${html.length}`);
-
-    // If explicit no-availability signal, skip
-    if (noAvailability && !hasSlots) return null;
-
-    // If we found slot indicators, definitely include
-    // If page loaded but we can't tell either way (JS-rendered), include it
-    // since the API already confirmed it supports reservations
-    const profileUrl = `https://www.yelp.com/biz/${alias}`;
-
+    // If the page loaded and didn't say "no availability", include it
+    console.log(`Yelp page ${biz.name}: INCLUDED (no negative signals)`);
     return {
       name: biz.name || "",
       cuisine: biz.categories?.map(c => c.title).join(", ") || "",
@@ -494,12 +572,12 @@ async function checkYelpAvailability(biz, params) {
       platform: "Yelp",
       hasAvailability: true,
       bookingUrl: reservationUrl,
-      profileUrl,
+      profileUrl: `https://www.yelp.com/biz/${alias}`,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
       distanceMeters: biz.distance || null,
     };
   } catch (e) {
-    console.log(`Yelp page ${biz.name}: timeout/error — ${e.message}`);
+    console.log(`Yelp page ${biz.name}: ${e.message}`);
     return null;
   }
 }
