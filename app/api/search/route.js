@@ -29,11 +29,24 @@ async function parseQuery(userMessage, location, clientTime) {
 
   console.log("Client time:", today, `hour=${currentHour}`, "tomorrow:", tomorrow);
 
-  const prompt = `Extract restaurant search params. Today is ${today}. Tomorrow is ${tomorrow}. Current hour: ${currentHour}.
+  // Calculate day of week and upcoming dates for the prompt
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const todayDayName = dayNames[tomorrowDate.getDay() === 0 ? 6 : tomorrowDate.getDay() - 1]; // baseDate's day
+  const fmtD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const upcomingDays = [];
+  for (let i = 1; i <= 14; i++) {
+    const d = new Date(todayParts[0], todayParts[1] - 1, todayParts[2] + i);
+    upcomingDays.push(`${dayNames[d.getDay()]} ${fmtD(d)}`);
+  }
+
+  const prompt = `Extract restaurant search params. Today is ${todayDayName} ${today}. Tomorrow is ${tomorrow}. Current hour: ${currentHour}.
+Upcoming dates: ${upcomingDays.join(", ")}
 ${location?.city ? `User is in ${location.city}, ${location.region}. Coords: ${location.lat}, ${location.lng}` : ""}
 Return ONLY valid JSON: {"cuisine":"","date":"YYYY-MM-DD","time":"HH:MM","party_size":2,"city":"","state":"","lat":null,"lng":null,"query":""}
-- "tonight" = ${today}. "tomorrow" = ${tomorrow}. Default time 19:00, party 2.
-- query=cuisine keyword like "mexican","sushi". Empty if generic like "table for 2".
+- "tonight" or "today" = ${today}. "tomorrow" = ${tomorrow}. Use the upcoming dates list for day names.
+- "next tuesday" means the FIRST upcoming Tuesday from the list above. "this saturday" means the FIRST upcoming Saturday.
+- Default time 19:00, party 2. "dinner" = 19:00, "lunch" = 12:00, "brunch" = 11:00.
+- query=cuisine keyword like "mexican","sushi". Empty if generic like "table for 2" or "dinner".
 - Default location: ${location?.city || "Atlanta"}, ${location?.region || "GA"}
 User: "${userMessage}"`;
 
@@ -81,9 +94,22 @@ function buildFallback(msg, location, today, currentHour) {
   const fmtDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   if (msg.includes("tomorrow")) { const d = new Date(baseDate); d.setDate(d.getDate() + 1); date = fmtDate(d); }
-  else if (msg.includes("saturday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
-  else if (msg.includes("friday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
-  else if (msg.includes("sunday")) { const d = new Date(baseDate); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = fmtDate(d); }
+  else {
+    // Handle all days of the week, with "next" meaning the one after this coming one
+    const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+    const hasNext = msg.includes("next ");
+    for (const [name, target] of Object.entries(dayMap)) {
+      if (msg.includes(name)) {
+        const d = new Date(baseDate);
+        let diff = (target - d.getDay() + 7) % 7;
+        if (diff === 0) diff = 7; // same day means next week
+        if (hasNext) diff += 7; // "next tuesday" = the one after this coming tuesday
+        d.setDate(d.getDate() + diff);
+        date = fmtDate(d);
+        break;
+      }
+    }
+  }
 
   let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
   const tm = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
@@ -391,103 +417,25 @@ async function searchYelp(params) {
     }
 
     const data = await res.json();
-    console.log("Yelp search:", data.businesses?.length || 0, "businesses");
-
-    // Filter to restaurants that support reservations
-    const candidates = (data.businesses || []).filter(
-      biz => biz.transactions?.includes("restaurant_reservation")
-    ).slice(0, 10);
-
-    if (candidates.length === 0) return [];
-
-    // Check REAL availability via /v3/bookings/{alias}/openings for each
-    console.log("Yelp: checking openings for", candidates.length, "restaurants");
-    const verified = await Promise.all(
-      candidates.map(biz => checkYelpOpenings(biz, params))
-    );
-    return verified.filter(Boolean);
+    console.log("Yelp:", data.businesses?.length || 0, "businesses");
+    return mapYelpResults(data.businesses || [], params);
   } catch (e) {
     console.error("Yelp error:", e.message);
     return [];
   }
 }
 
-async function checkYelpOpenings(biz, params) {
-  const alias = biz.alias || "";
-  const yelpTime = (params?.time || "19:00");
-  const profileUrl = `https://www.yelp.com/biz/${alias}`;
+function mapYelpResults(businesses, params) {
+  const yelpTime = (params?.time || "19:00").replace(":", "");
 
-  try {
-    const openingsUrl = `https://api.yelp.com/v3/bookings/${alias}/openings?covers=${params?.party_size || 2}&date=${params?.date || ""}&time=${yelpTime}`;
-    const res = await withTimeout(
-      fetch(openingsUrl, {
-        headers: {
-          Authorization: `Bearer ${YELP_API_KEY}`,
-          Accept: "application/json",
-        },
-      }),
-      3000
-    );
+  return businesses.slice(0, 10).map((biz) => {
+    const alias = biz.alias || "";
+    const profileUrl = `https://www.yelp.com/biz/${alias}`;
+    const hasReservation = biz.transactions?.includes("restaurant_reservation");
+    if (!hasReservation) return null;
 
-    if (res.ok) {
-      const data = await res.json();
-      const times = data?.reservation_times || [];
-      // Find slots on the requested date
-      const dateSlots = times.find(t => t.date === params?.date);
-      const availableTimes = dateSlots?.times || [];
-      console.log(`Yelp openings ${biz.name}: ${availableTimes.length} slots on ${params?.date}`);
+    const bookingUrl = `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
 
-      if (availableTimes.length === 0) return null; // No availability — skip
-
-      // Use the first available slot's URL if provided
-      const bestSlot = availableTimes[0];
-      const bookingUrl = bestSlot?.url ||
-        `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime.replace(":", "")}&covers=${params?.party_size || 2}`;
-
-      return {
-        name: biz.name || "",
-        cuisine: biz.categories?.map(c => c.title).join(", ") || "",
-        price: biz.price || "",
-        rating: biz.rating || null,
-        reviewCount: biz.review_count || null,
-        address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
-        platform: "Yelp",
-        hasAvailability: true,
-        bookingUrl,
-        profileUrl,
-        distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
-        distanceMeters: biz.distance || null,
-        availableSlots: availableTimes.length,
-      };
-    } else {
-      const status = res.status;
-      if (status === 401 || status === 403) {
-        // Openings endpoint not available with our key — fall back to showing the restaurant
-        // but with reservation link (user clicks through to check)
-        console.log(`Yelp openings ${biz.name}: ${status} — endpoint not available, including with caveat`);
-        const yelpTimeFlat = yelpTime.replace(":", "");
-        return {
-          name: biz.name || "",
-          cuisine: biz.categories?.map(c => c.title).join(", ") || "",
-          price: biz.price || "",
-          rating: biz.rating || null,
-          reviewCount: biz.review_count || null,
-          address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
-          platform: "Yelp",
-          hasAvailability: true,
-          availabilityVerified: false,
-          bookingUrl: `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTimeFlat}&covers=${params?.party_size || 2}`,
-          profileUrl,
-          distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
-          distanceMeters: biz.distance || null,
-        };
-      }
-      console.log(`Yelp openings ${biz.name}: ${status} — skipping`);
-      return null;
-    }
-  } catch (e) {
-    console.log(`Yelp openings ${biz.name}: timeout/error — including with caveat`);
-    const yelpTimeFlat = (params?.time || "19:00").replace(":", "");
     return {
       name: biz.name || "",
       cuisine: biz.categories?.map(c => c.title).join(", ") || "",
@@ -498,12 +446,12 @@ async function checkYelpOpenings(biz, params) {
       platform: "Yelp",
       hasAvailability: true,
       availabilityVerified: false,
-      bookingUrl: `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTimeFlat}&covers=${params?.party_size || 2}`,
-      profileUrl: `https://www.yelp.com/biz/${alias}`,
+      bookingUrl,
+      profileUrl,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
       distanceMeters: biz.distance || null,
     };
-  }
+  }).filter(Boolean);
 }
 
 // ============================================================
