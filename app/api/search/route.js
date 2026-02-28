@@ -131,35 +131,58 @@ async function searchResy(params) {
       const venues = data?.results?.venues || [];
       console.log("Resy [1]:", venues.length, "venues");
       if (venues.length > 0) {
-        // Log FULL first venue to understand the exact structure
-        const sample = venues[0];
-        console.log("Resy FULL venue[0]:", JSON.stringify(sample).slice(0, 1500));
+        // Log first venue structure
+        console.log("Resy venue[0]:", JSON.stringify(venues[0]).slice(0, 1500));
 
-        return venues.slice(0, 15).map((v) => {
-          const venue = v.venue || v;
-          const hasSlots = (v.slots?.length || 0) > 0;
-          const venueName = venue.name || "";
-          const encodedName = encodeURIComponent(venueName);
+        // For each venue, get full details (including city) via /3/venue endpoint in parallel
+        const enriched = await Promise.all(
+          venues.slice(0, 10).map(async (v) => {
+            const venue = v.venue || v;
+            const hasSlots = (v.slots?.length || 0) > 0;
+            if (!hasSlots) return null;
 
-          // Use Resy search URL — always works regardless of venue city
-          // Resy will resolve to the correct venue page from the query
-          const bookingUrl = `https://resy.com/cities/${citySlug}?query=${encodedName}&date=${params.date}&seats=${params.party_size}`;
+            const venueId = venue.id?.resy || venue.id;
+            const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
-          console.log("Resy URL for", venueName, "→", bookingUrl.slice(0, 120));
+            // Try to get full venue details for correct city
+            let venueCity = params.city || "atlanta";
+            let venueState = params.state || "ga";
+            try {
+              if (venueId) {
+                const detailRes = await withTimeout(
+                  fetch(`https://api.resy.com/3/venue?id=${venueId}&url_slug=${slug}`, { headers }),
+                  3000
+                );
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  const loc = detail?.location || detail?.venue?.location || {};
+                  venueCity = loc.city || loc.locality || venueCity;
+                  venueState = loc.state || loc.region || venueState;
+                  console.log(`Resy venue ${venue.name}: city=${venueCity}, state=${venueState}`);
+                }
+              }
+            } catch (e) {
+              // Use fallback city — not critical
+            }
 
-          return {
-            name: venueName,
-            cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
-            price: venue.price_range ? "$".repeat(venue.price_range) : "",
-            rating: venue.rating || null,
-            reviewCount: venue.num_ratings || null,
-            address: venue.neighborhood || venue.location?.neighborhood || "",
-            platform: "Resy",
-            hasAvailability: hasSlots,
-            bookingUrl,
-            profileUrl: bookingUrl,
-          };
-        }).filter(r => r.name && r.hasAvailability);
+            const venueCitySlug = resyCitySlug(venueCity, venueState);
+            const bookingUrl = `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`;
+
+            return {
+              name: venue.name || "",
+              cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
+              price: venue.price_range ? "$".repeat(venue.price_range) : "",
+              rating: venue.rating || null,
+              reviewCount: venue.num_ratings || null,
+              address: venue.neighborhood || venue.location?.neighborhood || "",
+              platform: "Resy",
+              hasAvailability: hasSlots,
+              bookingUrl,
+              profileUrl: bookingUrl,
+            };
+          })
+        );
+        return enriched.filter(Boolean);
       }
     } else {
       const err = await res.text().catch(() => "");
@@ -190,24 +213,48 @@ async function searchResy(params) {
       const venues = data?.search?.hits || data?.results || [];
       console.log("Resy [2]:", venues.length, "venues");
       if (venues.length > 0) {
-        return venues.slice(0, 15).map((venue) => {
-          const available = venue.available !== false && venue.notify_available !== true;
-          const venueName = venue.name || "";
-          const encodedName = encodeURIComponent(venueName);
-          const bookingUrl = `https://resy.com/cities/${citySlug}?query=${encodedName}&date=${params.date}&seats=${params.party_size}`;
-          return {
-            name: venueName,
-            cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
-            price: venue.price_range ? "$".repeat(venue.price_range) : "",
-            rating: venue.rating || venue.score || null,
-            reviewCount: venue.num_ratings || null,
-            address: venue.location?.neighborhood || venue.neighborhood || "",
-            platform: "Resy",
-            hasAvailability: available,
-            bookingUrl,
-            profileUrl: bookingUrl,
-          };
-        }).filter(r => r.name && r.hasAvailability);
+        const enriched = await Promise.all(
+          venues.slice(0, 10).map(async (venue) => {
+            const available = venue.available !== false && venue.notify_available !== true;
+            if (!available) return null;
+
+            const venueId = venue.id?.resy || venue.objectID || venue.id;
+            const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+            let venueCity = params.city || "atlanta";
+            let venueState = params.state || "ga";
+            try {
+              if (venueId) {
+                const detailRes = await withTimeout(
+                  fetch(`https://api.resy.com/3/venue?id=${venueId}&url_slug=${slug}`, { headers: { ...headers, "Content-Type": "application/json" } }),
+                  3000
+                );
+                if (detailRes.ok) {
+                  const detail = await detailRes.json();
+                  const loc = detail?.location || detail?.venue?.location || {};
+                  venueCity = loc.city || loc.locality || venueCity;
+                  venueState = loc.state || loc.region || venueState;
+                }
+              }
+            } catch {}
+
+            const venueCitySlug = resyCitySlug(venueCity, venueState);
+            const bookingUrl = `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`;
+            return {
+              name: venue.name || "",
+              cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
+              price: venue.price_range ? "$".repeat(venue.price_range) : "",
+              rating: venue.rating || venue.score || null,
+              reviewCount: venue.num_ratings || null,
+              address: venue.location?.neighborhood || venue.neighborhood || "",
+              platform: "Resy",
+              hasAvailability: available,
+              bookingUrl,
+              profileUrl: bookingUrl,
+            };
+          })
+        );
+        return enriched.filter(Boolean);
       }
     } else {
       const err = await res.text().catch(() => "");
