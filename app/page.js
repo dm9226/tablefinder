@@ -167,12 +167,20 @@ function TableFinder() {
     setResults(null);
 
     try {
+      const now = new Date();
+      const localDate = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
+      const localHour = now.getHours();
+      const localTime = `${localHour.toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
+
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [{ role: "user", content: text }],
           location: userLocation,
+          localDate,
+          localTime,
+          localHour,
         }),
       });
 
@@ -277,25 +285,7 @@ function TableFinder() {
           </div>
         </div>
 
-        {/* Quick suggestions — only on home */}
-        {!results && !loading && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 20 }}>
-            {[
-              "Mexican for 2 tonight",
-              "Italian fine dining Saturday",
-              "Sushi this Friday, 4 people",
-              "Brunch Sunday for 6",
-            ].map((s) => (
-              <button key={s} onClick={() => { setInput(s); search(s); }}
-                style={{ padding: "8px 16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, color: "#C4B8A8", fontSize: 13, cursor: "pointer", fontFamily: "'Outfit', sans-serif", transition: "all 0.2s" }}
-                onMouseEnter={(e) => { e.target.style.borderColor = "rgba(232,168,109,0.3)"; e.target.style.color = "#E8A86D"; }}
-                onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.08)"; e.target.style.color = "#C4B8A8"; }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        )}
+        {/* Quick suggestions removed */}
       </div>
 
       {/* Loading */}
