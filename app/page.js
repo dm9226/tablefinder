@@ -1,465 +1,362 @@
-// TableFinder v2 - Resy + Yelp direct API integration
-// Fast: one call per platform, parallel execution, hard timeouts
+"use client";
+import { useState, useRef, useEffect, Component } from "react";
 
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
-const YELP_API_KEY = process.env.YELP_API_KEY;
-const RESY_API_KEY = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5";
-
-function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)),
-  ]);
-}
-
-// ============================================================
-// STEP 1: Parse natural language → search params
-// ============================================================
-
-async function parseQuery(userMessage, location) {
-  const today = new Date().toISOString().split("T")[0];
-  const now = new Date();
-  const currentHour = now.getHours();
-
-  const prompt = `You are a query parser. Extract restaurant search parameters.
-Today: ${today}. Current hour: ${currentHour}.
-${location?.city ? `User location: ${location.city}, ${location.region || ""}` : ""}
-${location?.lat ? `Coordinates: ${location.lat}, ${location.lng}` : ""}
-
-Return ONLY valid JSON, no markdown:
-{"cuisine":"","date":"YYYY-MM-DD","time":"HH:MM","party_size":2,"city":"","state":"","lat":null,"lng":null,"query":""}
-
-Rules:
-- "tonight" = today, time 19:00 (or current hour + 1 if after 19:00, max 21:00)
-- "tomorrow" = tomorrow
-- Default time 19:00, default party 2
-- query = short cuisine/food keyword like "mexican", "sushi", "steakhouse". Empty string if none specified.
-- If user says generic things like "table for 2" or "dinner tonight", query should be empty string
-- CRITICAL: Default city="${location?.city || ""}", state="${location?.region || ""}", lat=${location?.lat || "null"}, lng=${location?.lng || "null"} unless user names a different city
-
-User: "${userMessage}"`;
-
-  try {
-    const res = await withTimeout(
-      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
-        }),
-      }),
-      5000
-    );
-
-    if (!res.ok) throw new Error(`Gemini ${res.status}`);
-
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    console.log("Gemini raw:", text.slice(0, 200));
-    const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-
-    // Override with GPS if user didn't name a different city
-    if (location?.lat && (!parsed.city || parsed.city.toLowerCase() === (location.city || "").toLowerCase())) {
-      parsed.lat = location.lat;
-      parsed.lng = location.lng;
-      parsed.city = location.city || parsed.city;
-      parsed.state = location.region || parsed.state;
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "sans-serif", flexDirection: "column", gap: 16, padding: 40 }}>
+          <h2>Something went wrong</h2>
+          <p style={{ color: "#8A7E70", maxWidth: 400, textAlign: "center" }}>{this.state.error?.message}</p>
+          <button onClick={() => window.location.reload()} style={{ padding: "10px 20px", background: "#E8A86D", color: "#1A1612", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}>Reload</button>
+        </div>
+      );
     }
-    if (!parsed.lat && location?.lat) { parsed.lat = location.lat; parsed.lng = location.lng; }
-    if (!parsed.city && location?.city) parsed.city = location.city;
-
-    return sanitize(parsed);
-  } catch (e) {
-    console.error("Parse error:", e.message);
-    return sanitize(buildFallback(userMessage, location, today, currentHour));
+    return this.props.children;
   }
 }
 
-function buildFallback(msg, location, today, currentHour) {
-  msg = msg.toLowerCase();
-  const partyMatch = msg.match(/(?:for|party of|group of)\s*(\d+)/);
-  const party_size = partyMatch ? parseInt(partyMatch[1]) : 2;
+export default function Wrapper() {
+  return <ErrorBoundary><TableFinder /></ErrorBoundary>;
+}
 
-  let date = today;
-  if (msg.includes("tomorrow")) {
-    const d = new Date(); d.setDate(d.getDate() + 1); date = d.toISOString().split("T")[0];
-  } else if (msg.includes("saturday")) {
-    const d = new Date(); d.setDate(d.getDate() + ((6 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
-  } else if (msg.includes("friday")) {
-    const d = new Date(); d.setDate(d.getDate() + ((5 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
-  } else if (msg.includes("sunday")) {
-    const d = new Date(); d.setDate(d.getDate() + ((0 - d.getDay() + 7) % 7 || 7)); date = d.toISOString().split("T")[0];
-  }
+function safe(val) {
+  if (val == null) return "";
+  if (typeof val === "string") return val;
+  if (typeof val === "number") return String(val);
+  if (typeof val === "object") return val.name || val.label || val.average || val.value || "";
+  return String(val);
+}
 
-  let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
-  const timeMatch = msg.match(/(\d{1,2})(?::(\d{2}))?\s*(pm|am)/i);
-  if (timeMatch) {
-    let h = parseInt(timeMatch[1]);
-    const m = timeMatch[2] || "00";
-    if (timeMatch[3].toLowerCase() === "pm" && h < 12) h += 12;
-    if (timeMatch[3].toLowerCase() === "am" && h === 12) h = 0;
-    time = `${h.toString().padStart(2, "0")}:${m}`;
-  }
+// ============================================================
+// Components
+// ============================================================
 
-  const cuisines = ["mexican", "italian", "japanese", "sushi", "chinese", "thai", "indian", "french", "korean", "mediterranean", "american", "steakhouse", "seafood", "brunch", "bbq", "pizza", "vietnamese", "greek", "spanish", "tapas", "ethiopian"];
-  const query = cuisines.find(c => msg.includes(c)) || "";
-
-  return {
-    cuisine: query, date, time, party_size,
-    city: location?.city || "", state: location?.region || "",
-    lat: location?.lat || null, lng: location?.lng || null, query,
+function PlatformBadge({ platform }) {
+  const colors = {
+    Resy: { bg: "rgba(0,100,255,0.08)", text: "#4A90D9", border: "rgba(0,100,255,0.2)" },
+    Yelp: { bg: "rgba(196,18,0,0.08)", text: "#C41200", border: "rgba(196,18,0,0.2)" },
   };
+  const c = colors[platform] || { bg: "rgba(255,255,255,0.05)", text: "#aaa", border: "rgba(255,255,255,0.1)" };
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.2, color: c.text, background: c.bg, border: `1px solid ${c.border}`, padding: "3px 8px", borderRadius: 4, whiteSpace: "nowrap" }}>
+      {platform}
+    </span>
+  );
 }
 
-function sanitize(p) {
-  // Fix time
-  const tm = (p.time || "19:00").match(/^(\d{1,2}):(\d{2})$/);
-  if (tm) {
-    let h = Math.min(23, Math.max(0, parseInt(tm[1])));
-    p.time = `${h.toString().padStart(2, "0")}:${tm[2]}`;
-  } else {
-    p.time = "19:00";
-  }
+function BookingButton({ restaurant }) {
+  const isResy = restaurant.platform === "Resy";
+  const color = isResy ? { bg: "rgba(72,128,255,0.12)", border: "rgba(72,128,255,0.35)", text: "#4880FF", hover: "rgba(72,128,255,0.22)" }
+    : { bg: "rgba(196,18,0,0.10)", border: "rgba(196,18,0,0.30)", text: "#C41200", hover: "rgba(196,18,0,0.18)" };
+  const label = isResy ? "Reserve on Resy →" : "Reserve on Yelp →";
 
-  // Strip junk queries
-  const junk = ["table", "restaurant", "restaurants", "food", "dinner", "lunch", "reservation", "book", "find", "me", "please", "get", "want", "need", "a", "the"];
-  if (p.query && junk.includes(p.query.toLowerCase().trim())) p.query = "";
-  if (p.cuisine && junk.includes(p.cuisine.toLowerCase().trim())) p.cuisine = "";
+  return (
+    <a href={restaurant.bookingUrl} target="_blank" rel="noopener noreferrer"
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 18px", background: color.bg, border: `1px solid ${color.border}`, borderRadius: 8, color: color.text, fontSize: 13, fontWeight: 600, fontFamily: "'Outfit', sans-serif", textDecoration: "none", cursor: "pointer", transition: "all 0.2s", whiteSpace: "nowrap" }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = color.hover; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = color.bg; }}
+    >
+      {label}
+    </a>
+  );
+}
 
-  p.party_size = Math.max(1, Math.min(20, parseInt(p.party_size) || 2));
+function RestaurantCard({ restaurant }) {
+  const ratingVal = typeof restaurant.rating === "object" ? restaurant.rating?.average : Number(restaurant.rating);
+  const showRating = ratingVal > 0;
 
-  console.log("Final params:", JSON.stringify(p));
-  return p;
+  return (
+    <div className="result-card" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ margin: 0, fontSize: 18, fontFamily: "'Playfair Display', Georgia, serif", color: "#F0E6D8", fontWeight: 500 }}>
+            <a href={restaurant.profileUrl || restaurant.bookingUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#F0E6D8", textDecoration: "none" }}>
+              {restaurant.name}
+            </a>
+          </h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginTop: 4, fontSize: 13, color: "#8A7E70" }}>
+            {restaurant.cuisine && <span>{safe(restaurant.cuisine)}</span>}
+            {restaurant.price && <span>{safe(restaurant.price)}</span>}
+            {showRating && <span>★ {ratingVal}{restaurant.reviewCount ? ` (${safe(restaurant.reviewCount)})` : ""}</span>}
+          </div>
+          {restaurant.address && (
+            <div style={{ fontSize: 12, color: "#6A5E50", marginTop: 4 }}>{safe(restaurant.address)}</div>
+          )}
+        </div>
+        <PlatformBadge platform={restaurant.platform} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
+        <BookingButton restaurant={restaurant} />
+        <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
+        {restaurant.distance && <span style={{ fontSize: 12, color: "#6A5E50" }}>{safe(restaurant.distance)}</span>}
+      </div>
+    </div>
+  );
+}
+
+function SearchSummary({ structured }) {
+  if (!structured?.searchParams) return null;
+  const p = structured.searchParams;
+  return (
+    <div style={{ background: "rgba(232,168,109,0.05)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#C4B8A8" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
+        <span><strong style={{ color: "#6BBF6B" }}>{structured.resultCount}</strong> available</span>
+        <span style={{ opacity: 0.6 }}>|</span>
+        <span>{safe(p.query || p.cuisine) || "All cuisines"}</span>
+        <span>{safe(p.city)}</span>
+        <span>{safe(p.date)} at {safe(p.time)}</span>
+        <span>Party of {safe(p.party_size)}</span>
+        {structured.elapsed && <span style={{ opacity: 0.4, fontSize: 11 }}>{(structured.elapsed / 1000).toFixed(1)}s</span>}
+      </div>
+    </div>
+  );
 }
 
 // ============================================================
-// STEP 2: Resy — try multiple endpoints until one works
+// MAIN APP — single page, search on hero
 // ============================================================
 
-async function searchResy(params) {
-  const headers = {
-    Authorization: `ResyAPI api_key="${RESY_API_KEY}"`,
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    Origin: "https://resy.com",
-    Referer: "https://resy.com/",
-  };
-  const citySlug = (params.city || "atlanta").toLowerCase().replace(/\s+/g, "-");
+function TableFinder() {
+  const [results, setResults] = useState(null); // { structured, reply, cached }
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationError, setLocationError] = useState(false);
+  const [searchHistory, setSearchHistory] = useState([]);
+  const inputRef = useRef(null);
+  const resultsRef = useRef(null);
 
-  // ---- Approach 1: GET /4/find (simplest, no POST body to get wrong) ----
-  try {
-    const url = `https://api.resy.com/4/find?lat=${params.lat || 33.749}&long=${params.lng || -84.388}&day=${params.date}&party_size=${params.party_size}`;
-    console.log("Resy [1] GET /4/find");
-
-    const res = await withTimeout(fetch(url, { headers }), 8000);
-
-    if (res.ok) {
-      const data = await res.json();
-      const venues = data?.results?.venues || [];
-      console.log("Resy [1] found", venues.length, "venues");
-      if (venues.length > 0) {
-        return venues.slice(0, 10).map((v) => {
-          const venue = v.venue || v;
-          const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-          return {
-            name: venue.name || "",
-            cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
-            price: venue.price_range ? "$".repeat(venue.price_range) : "",
-            rating: venue.rating || null,
-            reviewCount: venue.num_ratings || null,
-            address: venue.neighborhood || venue.location?.neighborhood || "",
-            platform: "Resy",
-            hasAvailability: (v.slots?.length || 0) > 0,
-            bookingUrl: `https://resy.com/cities/${citySlug}/${slug}?date=${params.date}&seats=${params.party_size}`,
-            profileUrl: `https://resy.com/cities/${citySlug}/${slug}`,
-          };
-        }).filter(r => r.name);
-      }
-    } else {
-      const err = await res.text().catch(() => "");
-      console.error("Resy [1]", res.status, err.slice(0, 500));
-    }
-  } catch (e) {
-    console.error("Resy [1] error:", e.message);
-  }
-
-  // ---- Approach 2: POST /3/venuesearch/search ----
-  try {
-    const body = {
-      geo: { latitude: params.lat || 33.749, longitude: params.lng || -84.388 },
-      per_page: 10,
-      slot_filter: { day: params.date, party_size: params.party_size },
-      types: ["venue"],
-    };
-    // Only add query if non-empty
-    if (params.query) body.query = params.query;
-
-    console.log("Resy [2] POST venuesearch:", JSON.stringify(body));
-
-    const res = await withTimeout(
-      fetch("https://api.resy.com/3/venuesearch/search", {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-      8000
+  const detectLocation = () => {
+    if (!navigator.geolocation) { setLocationError(true); return; }
+    setLocationLoading(true);
+    setLocationError(false);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+        try {
+          const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`);
+          const data = await res.json();
+          setUserLocation({
+            city: data.city || data.locality || "",
+            region: data.principalSubdivision || "",
+            zip: data.postcode || "",
+            neighborhood: data.localityInfo?.administrative?.[3]?.name || data.localityInfo?.administrative?.[2]?.name || "",
+            lat: latitude, lng: longitude,
+          });
+        } catch {
+          setUserLocation({ city: "", region: "", zip: "", neighborhood: "", lat: latitude, lng: longitude });
+        }
+        setLocationLoading(false);
+      },
+      () => { setLocationError(true); setLocationLoading(false); },
+      { timeout: 10000 }
     );
+  };
 
-    if (res.ok) {
-      const data = await res.json();
-      console.log("Resy [2] response keys:", Object.keys(data || {}).join(", "));
-      const venues = data?.search?.hits || data?.results || [];
-      console.log("Resy [2] found", venues.length, "venues");
-      if (venues.length > 0) return mapResyVenues(venues, params, citySlug);
-    } else {
-      const err = await res.text().catch(() => "");
-      console.error("Resy [2]", res.status, err.slice(0, 500));
-    }
-  } catch (e) {
-    console.error("Resy [2] error:", e.message);
-  }
+  useEffect(() => { detectLocation(); }, []);
 
-  // ---- Approach 3: GET /2/search (older endpoint) ----
-  try {
-    const url = `https://api.resy.com/2/search?lat=${params.lat || 33.749}&long=${params.lng || -84.388}&query=${encodeURIComponent(params.query || "")}&limit=10`;
-    console.log("Resy [3] GET /2/search");
+  const search = async (overrideText) => {
+    const text = (overrideText || input).trim();
+    if (!text || loading) return;
+    if (!overrideText) setInput("");
+    setLoading(true);
+    setResults(null);
 
-    const res = await withTimeout(fetch(url, { headers }), 8000);
-
-    if (res.ok) {
-      const data = await res.json();
-      console.log("Resy [3] response keys:", Object.keys(data || {}).join(", "));
-      const venues = data?.results || data?.hits || data?.venues || [];
-      console.log("Resy [3] found", venues.length, "venues");
-      if (venues.length > 0) return mapResyVenues(venues, params, citySlug);
-    } else {
-      const err = await res.text().catch(() => "");
-      console.error("Resy [3]", res.status, err.slice(0, 500));
-    }
-  } catch (e) {
-    console.error("Resy [3] error:", e.message);
-  }
-
-  console.log("Resy: all approaches failed");
-  return [];
-}
-
-function mapResyVenues(venues, params, citySlug) {
-  return venues.slice(0, 10).map((venue) => {
-    const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    return {
-      name: venue.name || "",
-      cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
-      price: venue.price_range ? "$".repeat(venue.price_range) : (venue.price ? "$".repeat(venue.price) : ""),
-      rating: venue.rating || venue.score || null,
-      reviewCount: venue.num_ratings || null,
-      address: venue.location?.neighborhood || venue.neighborhood || venue.region || "",
-      platform: "Resy",
-      hasAvailability: venue.available !== false && venue.notify_available !== true,
-      bookingUrl: `https://resy.com/cities/${citySlug}/${slug}?date=${params.date}&seats=${params.party_size}`,
-      profileUrl: `https://resy.com/cities/${citySlug}/${slug}`,
-    };
-  }).filter(r => r.name);
-}
-
-// ============================================================
-// STEP 3: Yelp Fusion API
-// ============================================================
-
-async function searchYelp(params) {
-  if (!YELP_API_KEY) {
-    console.log("Yelp: no API key configured");
-    return [];
-  }
-
-  try {
-    const url = new URL("https://api.yelp.com/v3/businesses/search");
-    url.searchParams.set("latitude", params.lat || 33.749);
-    url.searchParams.set("longitude", params.lng || -84.388);
-    url.searchParams.set("categories", "restaurants");
-    url.searchParams.set("limit", "15");
-    url.searchParams.set("sort_by", "best_match");
-    if (params.query) url.searchParams.set("term", params.query);
-
-    // Convert date + time to unix timestamp for open_at filter
     try {
-      const dt = new Date(`${params.date}T${params.time}:00`);
-      if (!isNaN(dt.getTime())) {
-        url.searchParams.set("open_at", Math.floor(dt.getTime() / 1000).toString());
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: text }],
+          location: userLocation,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Request failed" }));
+        throw new Error(err.error || `HTTP ${res.status}`);
       }
-    } catch {}
 
-    console.log("Yelp: searching", params.query || "(all)", "near", params.lat, params.lng);
+      const data = await res.json();
+      setResults({
+        query: text,
+        structured: data.structured || null,
+        reply: data.reply || "No results found.",
+        cached: data.cached || false,
+      });
 
-    const res = await withTimeout(
-      fetch(url.toString(), {
-        headers: {
-          Authorization: `Bearer ${YELP_API_KEY}`,
-          Accept: "application/json",
-        },
-      }),
-      8000
-    );
+      // Save to history
+      setSearchHistory(prev => [text, ...prev.filter(h => h !== text)].slice(0, 5));
 
-    if (!res.ok) {
-      const err = await res.text().catch(() => "");
-      console.error("Yelp:", res.status, err.slice(0, 300));
-      return [];
+      // Scroll to results
+      setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+    } catch (e) {
+      setResults({ query: text, structured: null, reply: `Something went wrong: ${e.message}`, cached: false });
     }
 
-    const data = await res.json();
-    const businesses = data?.businesses || [];
-    console.log("Yelp: found", businesses.length, "businesses");
+    setLoading(false);
+  };
 
-    return businesses.slice(0, 10).map((biz) => {
-      // Check if business supports reservations
-      const hasReservation = biz.transactions?.includes("restaurant_reservation");
+  const locationLabel = userLocation?.neighborhood || userLocation?.city;
+  const locationDetail = locationLabel ? `${locationLabel}${userLocation.zip ? ` ${userLocation.zip}` : ""}` : null;
 
-      // Build Yelp URL
-      const yelpUrl = biz.url?.split("?")[0] || `https://www.yelp.com/biz/${biz.alias || ""}`;
+  return (
+    <div style={{ minHeight: "100vh", background: "#1A1612", color: "#F0E6D8", fontFamily: "'Outfit', sans-serif" }}>
+      <style>{`
+        @import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap");
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #1A1612; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .result-card { animation: fadeIn 0.3s ease-out; }
+        input::placeholder { color: #6A5E50; }
+      `}</style>
 
-      return {
-        name: biz.name || "",
-        cuisine: biz.categories?.map(c => c.title).join(", ") || "",
-        price: biz.price || "",
-        rating: biz.rating || null,
-        reviewCount: biz.review_count || null,
-        address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
-        platform: "Yelp",
-        hasAvailability: hasReservation,
-        bookingUrl: yelpUrl,
-        profileUrl: yelpUrl,
-        phone: biz.display_phone || "",
-        distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
-        imageUrl: biz.image_url || "",
-      };
-    }).filter(r => r.name);
-  } catch (e) {
-    console.error("Yelp error:", e.message);
-    return [];
-  }
-}
+      {/* Header */}
+      <header style={{ position: "sticky", top: 0, background: "rgba(26,22,18,0.95)", backdropFilter: "blur(12px)", zIndex: 10, borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+        <div style={{ maxWidth: 780, margin: "0 auto", padding: "12px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => { setResults(null); setInput(""); }}>
+            <span style={{ fontSize: 20, color: "#E8A86D" }}>&#9673;</span>
+            <span style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: 18, color: "#F0E6D8", fontWeight: 400 }}>TableFinder</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {loading && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(232,168,109,0.1)", padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 500, color: "#E8A86D" }}>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: "pulse 1.2s infinite" }} />
+                Searching
+              </div>
+            )}
+            {locationDetail ? (
+              <span style={{ fontSize: 12, color: "#8A7E70", fontWeight: 500 }}>📍 {locationDetail}</span>
+            ) : (
+              <button onClick={detectLocation} disabled={locationLoading}
+                style={{ fontSize: 11, color: "#E8A86D", fontWeight: 500, background: "none", border: "1px solid rgba(232,168,109,0.25)", borderRadius: 16, padding: "4px 10px", cursor: "pointer", fontFamily: "'Outfit', sans-serif" }}>
+                {locationLoading ? "..." : "📍 Detect"}
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
 
-// ============================================================
-// RATE LIMITING + CACHING
-// ============================================================
+      {/* Hero + Search */}
+      <div style={{ maxWidth: 780, margin: "0 auto", padding: results ? "24px 20px 16px" : "80px 20px 40px", textAlign: "center", transition: "padding 0.3s" }}>
+        {!results && (
+          <>
+            <h1 style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: "clamp(32px, 5vw, 48px)", fontWeight: 400, lineHeight: 1.15, color: "#F0E6D8", marginBottom: 12 }}>
+              Every table. One search.
+            </h1>
+            <p style={{ fontSize: 16, color: "#8A7E70", maxWidth: 440, margin: "0 auto 28px", lineHeight: 1.5 }}>
+              Search Resy & Yelp for restaurants with available reservations near you.
+            </p>
+          </>
+        )}
 
-const rateLimit = new Map();
-const cache = new Map();
+        {/* Search bar — always visible */}
+        <div style={{ maxWidth: 600, margin: "0 auto" }}>
+          <div style={{ display: "flex", gap: 10, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "6px 6px 6px 18px", alignItems: "center" }}>
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && search()}
+              placeholder={userLocation?.city ? `Italian for 2, tonight in ${userLocation.city}...` : "Italian for 2, tonight..."}
+              disabled={loading}
+              style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "#F0E6D8", fontSize: 15, fontFamily: "'Outfit', sans-serif", padding: "10px 0" }}
+            />
+            <button
+              onClick={() => search()}
+              disabled={loading || !input.trim()}
+              style={{ background: input.trim() ? "#E8A86D" : "rgba(232,168,109,0.2)", color: "#1A1612", border: "none", borderRadius: 10, padding: "10px 20px", fontSize: 14, cursor: input.trim() ? "pointer" : "default", transition: "all 0.2s", fontWeight: 600, fontFamily: "'Outfit', sans-serif" }}
+            >
+              {loading ? "..." : "Search"}
+            </button>
+          </div>
+        </div>
 
-function checkRateLimit(ip) {
-  const now = Date.now();
-  const entry = rateLimit.get(ip);
-  if (!entry || now - entry.start > 3600000) {
-    rateLimit.set(ip, { count: 1, start: now });
-    return true;
-  }
-  if (entry.count >= 30) return false;
-  entry.count++;
-  return true;
-}
+        {/* Quick suggestions — only on home */}
+        {!results && !loading && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", marginTop: 20 }}>
+            {[
+              "Mexican for 2 tonight",
+              "Italian fine dining Saturday",
+              "Sushi this Friday, 4 people",
+              "Brunch Sunday for 6",
+            ].map((s) => (
+              <button key={s} onClick={() => { setInput(s); search(s); }}
+                style={{ padding: "8px 16px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, color: "#C4B8A8", fontSize: 13, cursor: "pointer", fontFamily: "'Outfit', sans-serif", transition: "all 0.2s" }}
+                onMouseEnter={(e) => { e.target.style.borderColor = "rgba(232,168,109,0.3)"; e.target.style.color = "#E8A86D"; }}
+                onMouseLeave={(e) => { e.target.style.borderColor = "rgba(255,255,255,0.08)"; e.target.style.color = "#C4B8A8"; }}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
-function getCacheKey(p) {
-  return `${p.query}|${p.date}|${p.time}|${p.party_size}|${Math.round((p.lat||0)*100)}|${Math.round((p.lng||0)*100)}`.toLowerCase();
-}
+      {/* Loading */}
+      {loading && (
+        <div style={{ maxWidth: 780, margin: "0 auto", padding: "20px 20px", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "#8A7E70", fontSize: 14 }}>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[0, 1, 2].map((i) => (
+              <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: `pulse 1.2s infinite ${i * 0.2}s` }} />
+            ))}
+          </div>
+          Searching Resy & Yelp...
+        </div>
+      )}
 
-// ============================================================
-// MAIN HANDLER
-// ============================================================
+      {/* Results */}
+      {results && (
+        <div ref={resultsRef} style={{ maxWidth: 780, margin: "0 auto", padding: "0 20px 60px" }}>
+          {/* What was searched */}
+          <div style={{ fontSize: 13, color: "#6A5E50", marginBottom: 12 }}>
+            Results for <span style={{ color: "#C4B8A8", fontWeight: 500 }}>"{results.query}"</span>
+            {results.cached && <span style={{ color: "#7BC47F", marginLeft: 8 }}>⚡ cached</span>}
+          </div>
 
-export async function POST(req) {
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  if (!checkRateLimit(ip)) {
-    return Response.json({ error: "Rate limit reached. Try again shortly." }, { status: 429 });
-  }
-  if (!GEMINI_KEY) {
-    return Response.json({ error: "GEMINI_API_KEY not configured" }, { status: 500 });
-  }
+          {results.structured?.restaurants?.length > 0 ? (
+            <>
+              <SearchSummary structured={results.structured} />
+              {results.structured.restaurants.map((r, i) => (
+                <RestaurantCard key={i} restaurant={r} />
+              ))}
+            </>
+          ) : (
+            <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", padding: "20px 24px", borderRadius: 12, fontSize: 15, lineHeight: 1.6, color: "#C4B8A8" }}>
+              {results.reply}
+            </div>
+          )}
+        </div>
+      )}
 
-  try {
-    const { messages, location } = await req.json();
-    const lastMessage = messages?.filter((m) => m.role === "user").pop()?.content || "";
-    if (!lastMessage) {
-      return Response.json({ error: "No message provided" }, { status: 400 });
-    }
+      {/* How it works — only on home with no results */}
+      {!results && !loading && (
+        <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px 60px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 24 }}>
+            {[
+              { step: "01", title: "Describe", desc: "Cuisine, date, party size — just type naturally." },
+              { step: "02", title: "Discover", desc: "We search Resy & Yelp for real-time availability." },
+              { step: "03", title: "Book", desc: "Click to reserve directly. No middleman." },
+            ].map((item) => (
+              <div key={item.step} style={{ padding: 20, background: "rgba(255,255,255,0.02)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
+                <div style={{ fontSize: 11, color: "#E8A86D", fontWeight: 600, letterSpacing: 2, marginBottom: 8 }}>{item.step}</div>
+                <div style={{ fontSize: 16, fontWeight: 500, color: "#F0E6D8", marginBottom: 6 }}>{item.title}</div>
+                <div style={{ fontSize: 13, color: "#8A7E70", lineHeight: 1.5 }}>{item.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-    const params = await parseQuery(lastMessage, location);
-
-    // Cache check
-    const cacheKey = getCacheKey(params);
-    const cached = cache.get(cacheKey);
-    if (cached && Date.now() - cached.time < 600000) {
-      console.log("Cache hit:", cacheKey);
-      return Response.json({ ...cached.data, cached: true });
-    }
-
-    // Search all platforms in parallel
-    const startTime = Date.now();
-    const platforms = [
-      searchResy(params).catch(e => { console.error("Resy fatal:", e.message); return []; }),
-      searchYelp(params).catch(e => { console.error("Yelp fatal:", e.message); return []; }),
-    ];
-
-    const [resyResults, yelpResults] = await Promise.all(platforms);
-    const elapsed = Date.now() - startTime;
-    console.log(`Done in ${elapsed}ms: Resy=${resyResults.length}, Yelp=${yelpResults.length}`);
-
-    // Merge results, deduplicate by name similarity
-    const allResults = [...resyResults];
-    const resyNames = new Set(resyResults.map(r => r.name.toLowerCase().replace(/[^a-z]/g, "")));
-
-    for (const yelp of yelpResults) {
-      const normalized = yelp.name.toLowerCase().replace(/[^a-z]/g, "");
-      // Skip if already found on Resy (prefer Resy since it has direct booking)
-      if (!resyNames.has(normalized)) {
-        allResults.push(yelp);
-      }
-    }
-
-    // Sort: availability first, then by rating
-    allResults.sort((a, b) => {
-      if (a.hasAvailability && !b.hasAvailability) return -1;
-      if (!a.hasAvailability && b.hasAvailability) return 1;
-      return (b.rating || 0) - (a.rating || 0);
-    });
-
-    const structured = {
-      type: "results",
-      searchParams: params,
-      restaurants: allResults,
-      resultCount: allResults.length,
-      platformsSearched: [
-        "Resy",
-        ...(YELP_API_KEY ? ["Yelp"] : []),
-      ],
-      elapsed,
-    };
-
-    let reply;
-    if (allResults.length === 0) {
-      reply = `No restaurants found for "${params.query || "your search"}" in ${params.city || "your area"} on ${params.date}. Try a different cuisine, date, or location.`;
-    } else {
-      const resyCount = resyResults.length;
-      const yelpCount = yelpResults.length;
-      const parts = [];
-      if (resyCount > 0) parts.push(`${resyCount} from Resy`);
-      if (yelpCount > 0) parts.push(`${yelpCount} from Yelp`);
-      reply = `Found ${allResults.length} restaurants (${parts.join(", ")}) in ${params.city || "your area"}.`;
-    }
-
-    const responseData = { reply, structured, searchParams: params };
-
-    // Cache
-    cache.set(cacheKey, { data: responseData, time: Date.now() });
-    if (cache.size > 200) {
-      const oldest = [...cache.entries()].sort((a, b) => a[1].time - b[1].time);
-      for (let i = 0; i < 50; i++) cache.delete(oldest[i][0]);
-    }
-
-    return Response.json(responseData);
-  } catch (e) {
-    console.error("Handler error:", e);
-    return Response.json({ error: `Search failed: ${e.message}` }, { status: 500 });
-  }
+      {/* Footer */}
+      <footer style={{ textAlign: "center", padding: "20px 24px", fontSize: 11, color: "rgba(255,255,255,0.15)" }}>
+        Real-time availability from Resy & Yelp · tablefinder.ai
+      </footer>
+    </div>
+  );
 }
