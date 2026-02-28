@@ -20,12 +20,19 @@ async function parseQuery(userMessage, location, clientTime) {
   // Use CLIENT's local date/time, not server UTC
   const today = clientTime?.localDate || new Date().toISOString().split("T")[0];
   const currentHour = clientTime?.localHour ?? new Date().getHours();
-  console.log("Client time:", today, `hour=${currentHour}`);
 
-  const prompt = `Extract restaurant search params. Today: ${today}, hour: ${currentHour}.
+  // Pre-calculate tomorrow for the prompt
+  const todayParts = today.split("-").map(Number);
+  const tomorrowDate = new Date(todayParts[0], todayParts[1] - 1, todayParts[2]);
+  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+  const tomorrow = `${tomorrowDate.getFullYear()}-${String(tomorrowDate.getMonth() + 1).padStart(2, "0")}-${String(tomorrowDate.getDate()).padStart(2, "0")}`;
+
+  console.log("Client time:", today, `hour=${currentHour}`, "tomorrow:", tomorrow);
+
+  const prompt = `Extract restaurant search params. Today is ${today}. Tomorrow is ${tomorrow}. Current hour: ${currentHour}.
 ${location?.city ? `User is in ${location.city}, ${location.region}. Coords: ${location.lat}, ${location.lng}` : ""}
 Return ONLY valid JSON: {"cuisine":"","date":"YYYY-MM-DD","time":"HH:MM","party_size":2,"city":"","state":"","lat":null,"lng":null,"query":""}
-- "tonight"=today, "tomorrow"=tomorrow. Default time 19:00, party 2.
+- "tonight" = ${today}. "tomorrow" = ${tomorrow}. Default time 19:00, party 2.
 - query=cuisine keyword like "mexican","sushi". Empty if generic like "table for 2".
 - Default location: ${location?.city || "Atlanta"}, ${location?.region || "GA"}
 User: "${userMessage}"`;
@@ -359,6 +366,7 @@ async function searchYelp(params) {
     url.searchParams.set("categories", yelpCategory || "restaurants");
     url.searchParams.set("limit", "20");
     url.searchParams.set("sort_by", "distance");
+    url.searchParams.set("radius", "12875");
     if (queryLower && !yelpCategory) url.searchParams.set("term", queryLower);
     url.searchParams.set("attributes", "reservation");
 
@@ -383,25 +391,103 @@ async function searchYelp(params) {
     }
 
     const data = await res.json();
-    console.log("Yelp:", data.businesses?.length || 0, "businesses");
-    return mapYelpResults(data.businesses || [], params);
+    console.log("Yelp search:", data.businesses?.length || 0, "businesses");
+
+    // Filter to restaurants that support reservations
+    const candidates = (data.businesses || []).filter(
+      biz => biz.transactions?.includes("restaurant_reservation")
+    ).slice(0, 10);
+
+    if (candidates.length === 0) return [];
+
+    // Check REAL availability via /v3/bookings/{alias}/openings for each
+    console.log("Yelp: checking openings for", candidates.length, "restaurants");
+    const verified = await Promise.all(
+      candidates.map(biz => checkYelpOpenings(biz, params))
+    );
+    return verified.filter(Boolean);
   } catch (e) {
     console.error("Yelp error:", e.message);
     return [];
   }
 }
 
-function mapYelpResults(businesses, params) {
-  const yelpTime = (params?.time || "19:00").replace(":", "");
+async function checkYelpOpenings(biz, params) {
+  const alias = biz.alias || "";
+  const yelpTime = (params?.time || "19:00");
+  const profileUrl = `https://www.yelp.com/biz/${alias}`;
 
-  return businesses.slice(0, 10).map((biz) => {
-    const alias = biz.alias || "";
-    const profileUrl = `https://www.yelp.com/biz/${alias}`;
-    const hasReservation = biz.transactions?.includes("restaurant_reservation");
-    if (!hasReservation) return null;
+  try {
+    const openingsUrl = `https://api.yelp.com/v3/bookings/${alias}/openings?covers=${params?.party_size || 2}&date=${params?.date || ""}&time=${yelpTime}`;
+    const res = await withTimeout(
+      fetch(openingsUrl, {
+        headers: {
+          Authorization: `Bearer ${YELP_API_KEY}`,
+          Accept: "application/json",
+        },
+      }),
+      3000
+    );
 
-    const bookingUrl = `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`;
+    if (res.ok) {
+      const data = await res.json();
+      const times = data?.reservation_times || [];
+      // Find slots on the requested date
+      const dateSlots = times.find(t => t.date === params?.date);
+      const availableTimes = dateSlots?.times || [];
+      console.log(`Yelp openings ${biz.name}: ${availableTimes.length} slots on ${params?.date}`);
 
+      if (availableTimes.length === 0) return null; // No availability — skip
+
+      // Use the first available slot's URL if provided
+      const bestSlot = availableTimes[0];
+      const bookingUrl = bestSlot?.url ||
+        `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime.replace(":", "")}&covers=${params?.party_size || 2}`;
+
+      return {
+        name: biz.name || "",
+        cuisine: biz.categories?.map(c => c.title).join(", ") || "",
+        price: biz.price || "",
+        rating: biz.rating || null,
+        reviewCount: biz.review_count || null,
+        address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
+        platform: "Yelp",
+        hasAvailability: true,
+        bookingUrl,
+        profileUrl,
+        distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
+        distanceMeters: biz.distance || null,
+        availableSlots: availableTimes.length,
+      };
+    } else {
+      const status = res.status;
+      if (status === 401 || status === 403) {
+        // Openings endpoint not available with our key — fall back to showing the restaurant
+        // but with reservation link (user clicks through to check)
+        console.log(`Yelp openings ${biz.name}: ${status} — endpoint not available, including with caveat`);
+        const yelpTimeFlat = yelpTime.replace(":", "");
+        return {
+          name: biz.name || "",
+          cuisine: biz.categories?.map(c => c.title).join(", ") || "",
+          price: biz.price || "",
+          rating: biz.rating || null,
+          reviewCount: biz.review_count || null,
+          address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
+          platform: "Yelp",
+          hasAvailability: true,
+          availabilityVerified: false,
+          bookingUrl: `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTimeFlat}&covers=${params?.party_size || 2}`,
+          profileUrl,
+          distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
+          distanceMeters: biz.distance || null,
+        };
+      }
+      console.log(`Yelp openings ${biz.name}: ${status} — skipping`);
+      return null;
+    }
+  } catch (e) {
+    console.log(`Yelp openings ${biz.name}: timeout/error — including with caveat`);
+    const yelpTimeFlat = (params?.time || "19:00").replace(":", "");
     return {
       name: biz.name || "",
       cuisine: biz.categories?.map(c => c.title).join(", ") || "",
@@ -411,12 +497,13 @@ function mapYelpResults(businesses, params) {
       address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
       platform: "Yelp",
       hasAvailability: true,
-      bookingUrl,
-      profileUrl,
+      availabilityVerified: false,
+      bookingUrl: `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTimeFlat}&covers=${params?.party_size || 2}`,
+      profileUrl: `https://www.yelp.com/biz/${alias}`,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
       distanceMeters: biz.distance || null,
     };
-  }).filter(Boolean);
+  }
 }
 
 // ============================================================
@@ -471,8 +558,12 @@ export async function POST(req) {
       if (!names.has(y.name.toLowerCase().replace(/[^a-z]/g, ""))) allResults.push(y);
     }
 
+    // Filter to 8 miles max (12875 meters) — skip items with no distance data
+    const MAX_DISTANCE = 12875;
+    const withinRange = allResults.filter(r => r.distanceMeters == null || r.distanceMeters <= MAX_DISTANCE);
+
     // Sort by distance (closest first), unknown distance at end
-    allResults.sort((a, b) => {
+    withinRange.sort((a, b) => {
       const da = a.distanceMeters ?? 999999;
       const db = b.distanceMeters ?? 999999;
       return da - db;
@@ -481,21 +572,22 @@ export async function POST(req) {
     const structured = {
       type: "results",
       searchParams: params,
-      restaurants: allResults,
-      resultCount: allResults.length,
+      restaurants: withinRange,
+      resultCount: withinRange.length,
       platformsSearched: ["Resy", ...(YELP_API_KEY ? ["Yelp"] : [])],
       elapsed,
     };
 
     let reply;
-    if (allResults.length === 0) {
-      reply = `No restaurants with available reservations found for "${params.query || "your search"}" in ${params.city || "your area"} on ${params.date}. Try a different cuisine, date, or larger search area.`;
+    if (withinRange.length === 0) {
+      reply = `No restaurants with available reservations found for "${params.query || "your search"}" within 8 miles on ${params.date}. Try a different cuisine, date, or larger search area.`;
     } else {
+      const rc = withinRange.filter(r => r.platform === "Resy").length;
+      const yc = withinRange.filter(r => r.platform === "Yelp").length;
       const parts = [];
-      const rc = resyResults.length, yc = allResults.length - rc;
       if (rc > 0) parts.push(`${rc} from Resy`);
       if (yc > 0) parts.push(`${yc} from Yelp`);
-      reply = `Found ${allResults.length} restaurants with available reservations (${parts.join(", ")}).`;
+      reply = `Found ${withinRange.length} restaurants with available reservations (${parts.join(", ")}).`;
     }
 
     const responseData = { reply, structured, searchParams: params };
