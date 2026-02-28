@@ -48,10 +48,14 @@ function PlatformBadge({ platform }) {
 }
 
 function BookingButton({ restaurant }) {
-  const isResy = restaurant.platform === "Resy";
-  const color = isResy ? { bg: "rgba(72,128,255,0.12)", border: "rgba(72,128,255,0.35)", text: "#4880FF", hover: "rgba(72,128,255,0.22)" }
-    : { bg: "rgba(196,18,0,0.10)", border: "rgba(196,18,0,0.30)", text: "#C41200", hover: "rgba(196,18,0,0.18)" };
-  const label = isResy ? "Reserve on Resy →" : "Reserve on Yelp →";
+  const p = restaurant.platform || "Web";
+  const colors = {
+    Resy: { bg: "rgba(72,128,255,0.12)", border: "rgba(72,128,255,0.35)", text: "#4880FF", hover: "rgba(72,128,255,0.22)" },
+    Yelp: { bg: "rgba(196,18,0,0.10)", border: "rgba(196,18,0,0.30)", text: "#C41200", hover: "rgba(196,18,0,0.18)" },
+    OpenTable: { bg: "rgba(218,55,67,0.10)", border: "rgba(218,55,67,0.30)", text: "#DA3743", hover: "rgba(218,55,67,0.18)" },
+  };
+  const color = colors[p] || { bg: "rgba(100,100,100,0.10)", border: "rgba(100,100,100,0.30)", text: "#555", hover: "rgba(100,100,100,0.18)" };
+  const label = `Reserve on ${p} →`;
 
   return (
     <a href={restaurant.bookingUrl} target="_blank" rel="noopener noreferrer"
