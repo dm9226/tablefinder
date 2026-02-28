@@ -129,10 +129,22 @@ async function searchResy(params) {
       const venues = data?.results?.venues || [];
       console.log("Resy [1]:", venues.length, "venues");
       if (venues.length > 0) {
+        // Log first venue's fields to understand structure
+        const sample = venues[0]?.venue || venues[0];
+        console.log("Resy sample venue keys:", Object.keys(sample || {}).join(", "));
+        console.log("Resy sample location:", JSON.stringify(sample?.location || sample?.geo || {}).slice(0, 300));
+
         return venues.slice(0, 15).map((v) => {
           const venue = v.venue || v;
           const hasSlots = (v.slots?.length || 0) > 0;
           const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+          // Use the venue's own city for the Resy URL, not the search city
+          const venueCity = venue.location?.city || venue.city || params.city || "atlanta";
+          const venueState = venue.location?.state || venue.state || params.state || "ga";
+          const venueCitySlug = resyCitySlug(venueCity, venueState);
+          const venueName = encodeURIComponent(venue.name || "");
+
           return {
             name: venue.name || "",
             cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
@@ -142,10 +154,10 @@ async function searchResy(params) {
             address: venue.neighborhood || venue.location?.neighborhood || "",
             platform: "Resy",
             hasAvailability: hasSlots,
-            bookingUrl: `https://resy.com/cities/${citySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`,
-            profileUrl: `https://resy.com/cities/${citySlug}/venues/${slug}`,
+            bookingUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}&query=${venueName}`,
+            profileUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}`,
           };
-        }).filter(r => r.name && r.hasAvailability); // ONLY available
+        }).filter(r => r.name && r.hasAvailability);
       }
     } else {
       const err = await res.text().catch(() => "");
@@ -179,6 +191,10 @@ async function searchResy(params) {
         return venues.slice(0, 15).map((venue) => {
           const slug = venue.url_slug || (venue.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
           const available = venue.available !== false && venue.notify_available !== true;
+          const venueCity = venue.location?.city || venue.city || params.city || "atlanta";
+          const venueState = venue.location?.state || venue.state || params.state || "ga";
+          const venueCitySlug = resyCitySlug(venueCity, venueState);
+          const venueName = encodeURIComponent(venue.name || "");
           return {
             name: venue.name || "",
             cuisine: Array.isArray(venue.cuisine) ? venue.cuisine.join(", ") : (venue.cuisine || venue.type || ""),
@@ -188,10 +204,10 @@ async function searchResy(params) {
             address: venue.location?.neighborhood || venue.neighborhood || "",
             platform: "Resy",
             hasAvailability: available,
-            bookingUrl: `https://resy.com/cities/${citySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}`,
-            profileUrl: `https://resy.com/cities/${citySlug}/venues/${slug}`,
+            bookingUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}?date=${params.date}&seats=${params.party_size}&query=${venueName}`,
+            profileUrl: `https://resy.com/cities/${venueCitySlug}/venues/${slug}`,
           };
-        }).filter(r => r.name && r.hasAvailability); // ONLY available
+        }).filter(r => r.name && r.hasAvailability);
       }
     } else {
       const err = await res.text().catch(() => "");
@@ -257,7 +273,7 @@ async function searchYelp(params) {
         if (retry.ok) {
           const data = await retry.json();
           console.log("Yelp retry:", data.businesses?.length || 0, "businesses");
-          return mapYelpResults(data.businesses || [], true);
+          return mapYelpResults(data.businesses || [], true, params);
         } else {
           const retryErr = await retry.text().catch(() => "");
           console.error("Yelp retry error:", retry.status, retryErr.slice(0, 300));
@@ -268,17 +284,27 @@ async function searchYelp(params) {
 
     const data = await res.json();
     console.log("Yelp:", data.businesses?.length || 0, "businesses");
-    return mapYelpResults(data.businesses || [], false);
+    return mapYelpResults(data.businesses || [], false, params);
   } catch (e) {
     console.error("Yelp error:", e.message);
     return [];
   }
 }
 
-function mapYelpResults(businesses, wasRetry) {
+function mapYelpResults(businesses, wasRetry, params) {
+  // Convert time "19:00" to "1900" format for Yelp
+  const yelpTime = (params?.time || "19:00").replace(":", "");
+
   return businesses.slice(0, 10).map((biz) => {
     const hasReservation = biz.transactions?.includes("restaurant_reservation");
-    const yelpUrl = biz.url?.split("?")[0] || `https://www.yelp.com/biz/${biz.alias || ""}`;
+    const alias = biz.alias || "";
+    // Profile page
+    const profileUrl = `https://www.yelp.com/biz/${alias}`;
+    // Reservation page with date/time/covers pre-filled
+    const bookingUrl = hasReservation
+      ? `https://www.yelp.com/reservations/${alias}?source=yelp_biz&date=${params?.date || ""}&time=${yelpTime}&covers=${params?.party_size || 2}`
+      : profileUrl;
+
     return {
       name: biz.name || "",
       cuisine: biz.categories?.map(c => c.title).join(", ") || "",
@@ -288,11 +314,11 @@ function mapYelpResults(businesses, wasRetry) {
       address: [biz.location?.address1, biz.location?.city].filter(Boolean).join(", ") || "",
       platform: "Yelp",
       hasAvailability: hasReservation,
-      bookingUrl: yelpUrl,
-      profileUrl: yelpUrl,
+      bookingUrl,
+      profileUrl,
       distance: biz.distance ? `${(biz.distance / 1609.34).toFixed(1)} mi` : "",
     };
-  }).filter(r => r.name && r.hasAvailability); // ONLY with reservations
+  }).filter(r => r.name && r.hasAvailability);
 }
 
 // ============================================================
