@@ -187,9 +187,10 @@ async function searchResyDirect(params) {
 
     const res = await withTimeout(
       fetch(`${RESY_API}/4/find?${searchParams}`, {
-        headers: {
+   headers: {
           Authorization: `ResyAPI api_key="${RESY_API_KEY}"`,
           "X-Resy-Universal-Auth": "",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         },
       }),
       8000
