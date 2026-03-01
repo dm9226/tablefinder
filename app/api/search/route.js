@@ -1,9 +1,41 @@
-// TableFinder v3 - Multi-platform via Render backend
-// Keeps the natural language parsing, forwards to the new backend
-// page.js does NOT need to change
+// TableFinder v4 - Resy direct from Vercel + Render backend for OpenTable/Yelp
+// Resy calls go direct (fast, reliable), OpenTable/Yelp go through Render backend
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || "https://tablefinder-backend.onrender.com";
+
+const RESY_API = "https://api.resy.com";
+const RESY_API_KEY = 'VbWk7s3L4KiK5fhm7e8pSOAREisPhDbL';
+
+const CITY_COORDS = {
+  atlanta: { lat: 33.749, lng: -84.388 },
+  austin: { lat: 30.267, lng: -97.743 },
+  boston: { lat: 42.360, lng: -71.058 },
+  chicago: { lat: 41.878, lng: -87.629 },
+  dallas: { lat: 32.776, lng: -96.796 },
+  denver: { lat: 39.739, lng: -104.990 },
+  houston: { lat: 29.760, lng: -95.369 },
+  "las vegas": { lat: 36.169, lng: -115.139 },
+  "los angeles": { lat: 34.052, lng: -118.243 },
+  miami: { lat: 25.761, lng: -80.191 },
+  nashville: { lat: 36.162, lng: -86.774 },
+  "new york": { lat: 40.712, lng: -74.006 },
+  philadelphia: { lat: 39.952, lng: -75.163 },
+  phoenix: { lat: 33.448, lng: -112.074 },
+  portland: { lat: 45.523, lng: -122.676 },
+  "san diego": { lat: 32.715, lng: -117.161 },
+  "san francisco": { lat: 37.774, lng: -122.419 },
+  seattle: { lat: 47.606, lng: -122.332 },
+  washington: { lat: 38.907, lng: -77.036 },
+};
+
+function getCityCoords(location) {
+  const loc = (location || "").toLowerCase().replace(/,.*/, "").trim();
+  for (const [city, coords] of Object.entries(CITY_COORDS)) {
+    if (loc.includes(city)) return coords;
+  }
+  return null;
+}
 
 function withTimeout(promise, ms) {
   return Promise.race([
@@ -13,7 +45,7 @@ function withTimeout(promise, ms) {
 }
 
 // ============================================================
-// STEP 1: Parse query (KEPT FROM EXISTING — this works well)
+// STEP 1: Parse query
 // ============================================================
 
 async function parseQuery(userMessage, location, clientTime) {
@@ -125,7 +157,109 @@ function sanitize(p) {
 }
 
 // ============================================================
-// STEP 2: Forward to Render backend
+// STEP 2A: Search Resy DIRECTLY from Vercel
+// ============================================================
+
+async function searchResyDirect(params) {
+  const startTime = Date.now();
+  try {
+    let coords = null;
+    if (params.lat && params.lng) {
+      coords = { lat: params.lat, lng: params.lng };
+    } else {
+      const location = `${params.city || "Atlanta"}, ${params.state || "GA"}`;
+      coords = getCityCoords(location);
+    }
+
+    if (!coords) {
+      console.log("[Resy] No coordinates found");
+      return [];
+    }
+
+    const searchParams = new URLSearchParams({
+      lat: coords.lat,
+      long: coords.lng,
+      day: params.date,
+      party_size: params.party_size || 2,
+      offset: 0,
+      limit: 20,
+    });
+
+    const res = await withTimeout(
+      fetch(`${RESY_API}/4/find?${searchParams}`, {
+        headers: {
+          Authorization: `ResyAPI api_key="${RESY_API_KEY}"`,
+          "X-Resy-Universal-Auth": "",
+        },
+      }),
+      8000
+    );
+
+    if (!res.ok) {
+      console.error(`[Resy] API returned ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    const hits = data?.results?.venues || [];
+    const cuisine = params.query || params.cuisine || "";
+    const results = [];
+
+    for (const hit of hits) {
+      const venue = hit.venue;
+      const slots = hit.slots || [];
+      if (slots.length === 0) continue;
+
+      if (cuisine) {
+        const cuisineLower = cuisine.toLowerCase();
+        const venueCuisine = (venue?.cuisine || []).map((c) => (c.name || c).toLowerCase());
+        const venueType = (venue?.type || "").toLowerCase();
+        const matchesCuisine =
+          venueCuisine.some((c) => c.includes(cuisineLower)) ||
+          venueType.includes(cuisineLower) ||
+          cuisineLower.includes(venueType);
+        if (!matchesCuisine && cuisineLower !== "all") continue;
+      }
+
+      const citySlug = venue?.location?.city_slug || "";
+      const timeSlots = slots.map((slot) => {
+        const slotDate = slot.date?.start;
+        if (slotDate) {
+          const d = new Date(slotDate);
+          return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+        }
+        return slot.shift?.time_start || "";
+      });
+
+      results.push({
+        name: venue?.name || "Unknown",
+        cuisine: (venue?.cuisine || []).map((c) => c.name || c).join(", "),
+        price: venue?.price_range_id ? "$".repeat(venue.price_range_id) : "",
+        rating: venue?.rating?.average || null,
+        reviewCount: null,
+        address: venue?.location?.address_1 || venue?.location?.neighborhood || "",
+        platform: "Resy",
+        hasAvailability: true,
+        bookingUrl: `https://resy.com/cities/${citySlug}/${venue?.url_slug}`,
+        profileUrl: `https://resy.com/cities/${citySlug}/${venue?.url_slug}`,
+        distance: "",
+        distanceMeters: null,
+        timeSlots,
+        confidence: "confirmed",
+      });
+    }
+
+    const latency = Date.now() - startTime;
+    console.log(`[Resy] Direct: ${results.length} restaurants in ${latency}ms`);
+    return results;
+  } catch (e) {
+    console.error(`[Resy] Direct error: ${e.message}`);
+    return [];
+  }
+}
+
+// ============================================================
+// STEP 2B: Forward to Render backend (OpenTable + Yelp)
 // ============================================================
 
 async function searchBackend(params) {
@@ -156,16 +290,11 @@ async function searchBackend(params) {
 // STEP 3: Map backend response → page.js format
 // ============================================================
 
-function mapBackendResponse(backendData, params, elapsed) {
-  const results = backendData.results || [];
-  const meta = backendData.meta || {};
-
-  // Map each restaurant to the format page.js expects
-  const restaurants = results.map((r) => {
-    // Map source → platform name (capitalized)
+function mapBackendResults(backendData) {
+  const results = backendData?.results || [];
+  return results.map((r) => {
     const platformMap = { resy: "Resy", opentable: "OpenTable", yelp: "Yelp" };
     const platform = platformMap[r.source] || r.source || "Web";
-
     return {
       name: r.name || "",
       cuisine: r.cuisine || "",
@@ -179,30 +308,14 @@ function mapBackendResponse(backendData, params, elapsed) {
       profileUrl: r.bookingUrl || "",
       distance: "",
       distanceMeters: null,
-      // NEW: time slots from the multi-platform backend
       timeSlots: r.timeSlots || [],
       confidence: r.confidence || "parsed",
     };
   });
-
-  const platformsSearched = ["Resy", "OpenTable", "Yelp"];
-  const activePlatforms = [...new Set(restaurants.map((r) => r.platform))];
-
-  return {
-    type: "results",
-    searchParams: params,
-    restaurants,
-    resultCount: restaurants.length,
-    platformsSearched,
-    activePlatforms,
-    platformDetails: meta.platforms || {},
-    elapsed: elapsed || meta.latency,
-    backendCached: meta.cached || false,
-  };
 }
 
 // ============================================================
-// Rate limit + cache (KEPT FROM EXISTING)
+// Rate limit + cache
 // ============================================================
 
 const rateLimit = new Map();
@@ -230,7 +343,6 @@ export async function POST(req) {
     const lastMessage = messages?.filter((m) => m.role === "user").pop()?.content || "";
     if (!lastMessage) return Response.json({ error: "No message" }, { status: 400 });
 
-    // Step 1: Parse natural language → structured params (same as before)
     const clientTime = { localDate, localTime, localHour };
     const params = await parseQuery(lastMessage, location, clientTime);
 
@@ -241,38 +353,52 @@ export async function POST(req) {
       return Response.json({ ...cached.data, cached: true });
     }
 
-    // Step 2: Forward to Render backend (searches Resy + OpenTable + Yelp in parallel)
+    // Search Resy directly + Render backend in parallel
     const startTime = Date.now();
 
-    let backendData;
-    try {
-      backendData = await searchBackend(params);
-    } catch (e) {
-      console.error("Backend error:", e.message);
-      return Response.json({
-        error: `Search backend unavailable: ${e.message}`,
-        reply: "The search service is temporarily unavailable. Please try again in a moment.",
-        structured: { type: "results", searchParams: params, restaurants: [], resultCount: 0, elapsed: Date.now() - startTime },
-      }, { status: 502 });
-    }
+    const [resyResults, backendData] = await Promise.allSettled([
+      searchResyDirect(params),
+      searchBackend(params).catch((e) => {
+        console.error("Backend error:", e.message);
+        return { results: [], meta: {} };
+      }),
+    ]);
+
+    const resy = resyResults.status === "fulfilled" ? resyResults.value : [];
+    const backend = backendData.status === "fulfilled" ? backendData.value : { results: [], meta: {} };
+
+    // Map backend results — skip any Resy from backend to avoid dupes
+    const backendRestaurants = mapBackendResults(backend).filter((r) => r.platform !== "Resy");
+
+    // Merge: Resy direct + backend OpenTable/Yelp
+    const allRestaurants = [...resy, ...backendRestaurants];
 
     const elapsed = Date.now() - startTime;
-    console.log(`Backend responded in ${elapsed}ms: ${backendData.results?.length || 0} results, cached=${backendData.meta?.cached}`);
+    const activePlatforms = [...new Set(allRestaurants.map((r) => r.platform))];
 
-    // Step 3: Map to page.js format
-    const structured = mapBackendResponse(backendData, params, elapsed);
+    console.log(`[Search] ${resy.length} Resy + ${backendRestaurants.length} backend = ${allRestaurants.length} total in ${elapsed}ms`);
+
+    const structured = {
+      type: "results",
+      searchParams: params,
+      restaurants: allRestaurants,
+      resultCount: allRestaurants.length,
+      platformsSearched: ["Resy", "OpenTable", "Yelp"],
+      activePlatforms,
+      platformDetails: backend?.meta?.platforms || {},
+      elapsed,
+      backendCached: backend?.meta?.cached || false,
+    };
 
     let reply;
-    if (structured.restaurants.length === 0) {
+    if (allRestaurants.length === 0) {
       reply = `No restaurants with available reservations found for "${params.query || "your search"}" on ${params.date}. Try a different cuisine, date, or time.`;
     } else {
-      const platforms = [...new Set(structured.restaurants.map((r) => r.platform))];
-      reply = `Found ${structured.restaurants.length} restaurants with available reservations (via ${platforms.join(", ")}).`;
+      reply = `Found ${allRestaurants.length} restaurants with available reservations (via ${activePlatforms.join(", ")}).`;
     }
 
     const responseData = { reply, structured, searchParams: params };
 
-    // Cache locally too (5 min)
     cache.set(key, { data: responseData, time: Date.now() });
     if (cache.size > 200) {
       const old = [...cache.entries()].sort((a, b) => a[1].time - b[1].time);
@@ -285,4 +411,3 @@ export async function POST(req) {
     return Response.json({ error: `Search failed: ${e.message}` }, { status: 500 });
   }
 }
-
