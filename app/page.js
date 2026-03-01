@@ -38,6 +38,7 @@ function PlatformBadge({ platform }) {
   const colors = {
     Resy: { bg: "rgba(0,100,255,0.08)", text: "#4A90D9", border: "rgba(0,100,255,0.2)" },
     Yelp: { bg: "rgba(196,18,0,0.08)", text: "#C41200", border: "rgba(196,18,0,0.2)" },
+    OpenTable: { bg: "rgba(218,55,67,0.08)", text: "#DA3743", border: "rgba(218,55,67,0.2)" },
   };
   const c = colors[platform] || { bg: "rgba(255,255,255,0.05)", text: "#aaa", border: "rgba(255,255,255,0.1)" };
   return (
@@ -47,7 +48,7 @@ function PlatformBadge({ platform }) {
   );
 }
 
-function BookingButton({ restaurant }) {
+function BookingButton({ restaurant, time }) {
   const p = restaurant.platform || "Web";
   const colors = {
     Resy: { bg: "rgba(72,128,255,0.12)", border: "rgba(72,128,255,0.35)", text: "#4880FF", hover: "rgba(72,128,255,0.22)" },
@@ -55,7 +56,7 @@ function BookingButton({ restaurant }) {
     OpenTable: { bg: "rgba(218,55,67,0.10)", border: "rgba(218,55,67,0.30)", text: "#DA3743", hover: "rgba(218,55,67,0.18)" },
   };
   const color = colors[p] || { bg: "rgba(100,100,100,0.10)", border: "rgba(100,100,100,0.30)", text: "#555", hover: "rgba(100,100,100,0.18)" };
-  const label = `Reserve on ${p} →`;
+  const label = time || `Reserve on ${p} →`;
 
   return (
     <a href={restaurant.bookingUrl} target="_blank" rel="noopener noreferrer"
@@ -71,6 +72,7 @@ function BookingButton({ restaurant }) {
 function RestaurantCard({ restaurant }) {
   const ratingVal = typeof restaurant.rating === "object" ? restaurant.rating?.average : Number(restaurant.rating);
   const showRating = ratingVal > 0;
+  const timeSlots = restaurant.timeSlots || [];
 
   return (
     <div className="result-card" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px", marginBottom: 12 }}>
@@ -92,11 +94,27 @@ function RestaurantCard({ restaurant }) {
         </div>
         <PlatformBadge platform={restaurant.platform} />
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
-        <BookingButton restaurant={restaurant} />
-        <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
-        {restaurant.distance && <span style={{ fontSize: 12, color: "#6A5E50" }}>{safe(restaurant.distance)}</span>}
-      </div>
+
+      {/* Time slots — show clickable booking buttons for each available time */}
+      {timeSlots.length > 0 ? (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 14 }}>
+          {timeSlots.slice(0, 6).map((slot, i) => (
+            <BookingButton key={i} restaurant={restaurant} time={slot} />
+          ))}
+          {timeSlots.length > 6 && (
+            <span style={{ fontSize: 12, color: "#6A5E50" }}>+{timeSlots.length - 6} more</span>
+          )}
+          {restaurant.confidence === "confirmed" && (
+            <span style={{ fontSize: 11, color: "#6BBF6B", fontWeight: 500, marginLeft: 4 }}>✓ confirmed</span>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
+          <BookingButton restaurant={restaurant} />
+          <span style={{ fontSize: 12, color: "#6BBF6B", fontWeight: 500 }}>✓ Available</span>
+          {restaurant.distance && <span style={{ fontSize: 12, color: "#6A5E50" }}>{safe(restaurant.distance)}</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -104,6 +122,7 @@ function RestaurantCard({ restaurant }) {
 function SearchSummary({ structured }) {
   if (!structured?.searchParams) return null;
   const p = structured.searchParams;
+  const platforms = structured.activePlatforms || structured.platformsSearched || [];
   return (
     <div style={{ background: "rgba(232,168,109,0.05)", border: "1px solid rgba(232,168,109,0.15)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 13, color: "#C4B8A8" }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "center" }}>
@@ -113,6 +132,12 @@ function SearchSummary({ structured }) {
         <span>{safe(p.city)}</span>
         <span>{safe(p.date)} at {safe(p.time)}</span>
         <span>Party of {safe(p.party_size)}</span>
+        {platforms.length > 0 && (
+          <>
+            <span style={{ opacity: 0.6 }}>|</span>
+            <span style={{ fontSize: 11 }}>{platforms.join(" · ")}</span>
+          </>
+        )}
         {structured.elapsed && <span style={{ opacity: 0.4, fontSize: 11 }}>{(structured.elapsed / 1000).toFixed(1)}s</span>}
       </div>
     </div>
@@ -124,7 +149,7 @@ function SearchSummary({ structured }) {
 // ============================================================
 
 function TableFinder() {
-  const [results, setResults] = useState(null); // { structured, reply, cached }
+  const [results, setResults] = useState(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [userLocation, setUserLocation] = useState(null);
@@ -172,7 +197,7 @@ function TableFinder() {
 
     try {
       const now = new Date();
-      const localDate = now.toLocaleDateString('en-CA'); // YYYY-MM-DD
+      const localDate = now.toLocaleDateString('en-CA');
       const localHour = now.getHours();
       const localTime = `${localHour.toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
 
@@ -201,10 +226,7 @@ function TableFinder() {
         cached: data.cached || false,
       });
 
-      // Save to history
       setSearchHistory(prev => [text, ...prev.filter(h => h !== text)].slice(0, 5));
-
-      // Scroll to results
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) {
       setResults({ query: text, structured: null, reply: `Something went wrong: ${e.message}`, cached: false });
@@ -262,12 +284,12 @@ function TableFinder() {
               Every table. One search.
             </h1>
             <p style={{ fontSize: 16, color: "#8A7E70", maxWidth: 440, margin: "0 auto 28px", lineHeight: 1.5 }}>
-              Search Resy & Yelp for restaurants with available reservations near you.
+              Search Resy, OpenTable &amp; Yelp for restaurants with available reservations near you.
             </p>
           </>
         )}
 
-        {/* Search bar — always visible */}
+        {/* Search bar */}
         <div style={{ maxWidth: 600, margin: "0 auto" }}>
           <div style={{ display: "flex", gap: 10, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: "6px 6px 6px 18px", alignItems: "center" }}>
             <input
@@ -288,8 +310,6 @@ function TableFinder() {
             </button>
           </div>
         </div>
-
-        {/* Quick suggestions removed */}
       </div>
 
       {/* Loading */}
@@ -300,14 +320,13 @@ function TableFinder() {
               <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8A86D", animation: `pulse 1.2s infinite ${i * 0.2}s` }} />
             ))}
           </div>
-          Searching Resy & Yelp...
+          Searching Resy, OpenTable &amp; Yelp...
         </div>
       )}
 
       {/* Results */}
       {results && (
         <div ref={resultsRef} style={{ maxWidth: 780, margin: "0 auto", padding: "0 20px 60px" }}>
-          {/* What was searched */}
           <div style={{ fontSize: 13, color: "#6A5E50", marginBottom: 12 }}>
             Results for <span style={{ color: "#C4B8A8", fontWeight: 500 }}>"{results.query}"</span>
             {results.cached && <span style={{ color: "#7BC47F", marginLeft: 8 }}>⚡ cached</span>}
@@ -328,14 +347,14 @@ function TableFinder() {
         </div>
       )}
 
-      {/* How it works — only on home with no results */}
+      {/* How it works */}
       {!results && !loading && (
         <div style={{ maxWidth: 700, margin: "0 auto", padding: "40px 24px 60px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 24 }}>
             {[
               { step: "01", title: "Describe", desc: "Cuisine, date, party size — just type naturally." },
-              { step: "02", title: "Discover", desc: "We search Resy & Yelp for real-time availability." },
-              { step: "03", title: "Book", desc: "Click to reserve directly. No middleman." },
+              { step: "02", title: "Discover", desc: "We search Resy, OpenTable & Yelp for real-time availability." },
+              { step: "03", title: "Book", desc: "Pick a time slot to reserve directly. No middleman." },
             ].map((item) => (
               <div key={item.step} style={{ padding: 20, background: "rgba(255,255,255,0.02)", borderRadius: 12, border: "1px solid rgba(255,255,255,0.04)" }}>
                 <div style={{ fontSize: 11, color: "#E8A86D", fontWeight: 600, letterSpacing: 2, marginBottom: 8 }}>{item.step}</div>
@@ -349,7 +368,7 @@ function TableFinder() {
 
       {/* Footer */}
       <footer style={{ textAlign: "center", padding: "20px 24px", fontSize: 11, color: "rgba(255,255,255,0.15)" }}>
-        Real-time availability from Resy & Yelp · tablefinder.ai
+        Real-time availability from Resy, OpenTable &amp; Yelp · tablefinder.ai
       </footer>
     </div>
   );
