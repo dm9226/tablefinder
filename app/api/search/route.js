@@ -203,6 +203,7 @@ async function searchResyDirect(params) {
 
     const data = await res.json();
     const hits = data?.results?.venues || [];
+    console.log("[Resy] Raw venue:", JSON.stringify(hits[0]).slice(0, 1000));
     const cuisine = params.query || params.cuisine || "";
     const results = [];
 
