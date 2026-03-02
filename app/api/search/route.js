@@ -223,7 +223,7 @@ async function searchResyDirect(params) {
         if (!matchesCuisine && cuisineLower !== "all") continue;
       }
 
-      const citySlug = venue?.location?.city_slug || `${(params.city || "atlanta").toLowerCase().replace(/\s+/g, "-")}-${(params.state || "ga").toLowerCase().substring(0, 2)}`;
+      const citySlug = venue?.location?.url_slug;
       const timeSlots = slots.map((slot) => {
         const slotDate = slot.date?.start;
         if (slotDate) {
