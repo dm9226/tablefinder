@@ -5,7 +5,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const BACKEND_URL = process.env.BACKEND_URL || "https://tablefinder-backend.onrender.com";
 
 const RESY_API = "https://api.resy.com";
-const RESY_API_KEY = 'VbWk7s3L4KiK5fhm7e8pSOAREisPhDbL';
+const RESY_API_KEY = 'VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5';
 
 const CITY_COORDS = {
   atlanta: { lat: 33.749, lng: -84.388 },
