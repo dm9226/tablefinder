@@ -222,7 +222,7 @@ async function searchResyDirect(params) {
         if (!matchesCuisine && cuisineLower !== "all") continue;
       }
 
-      const citySlug = venue?.location?.city_slug || "";
+      const citySlug = venue?.location?.city_slug || `${(params.city || "atlanta").toLowerCase().replace(/\s+/g, "-")}-${(params.state || "ga").toLowerCase().substring(0, 2)}`;
       const timeSlots = slots.map((slot) => {
         const slotDate = slot.date?.start;
         if (slotDate) {
@@ -241,8 +241,8 @@ async function searchResyDirect(params) {
         address: venue?.location?.address_1 || venue?.location?.neighborhood || "",
         platform: "Resy",
         hasAvailability: true,
-        bookingUrl: `https://resy.com/cities/${citySlug}/${venue?.url_slug}`,
-        profileUrl: `https://resy.com/cities/${citySlug}/${venue?.url_slug}`,
+       bookingUrl: `https://resy.com/cities/${citySlug}/venues/${venue?.url_slug}?date=${params.date}&seats=${params.party_size || 2}`,
+        profileUrl: `https://resy.com/cities/${citySlug}/venues/${venue?.url_slug}?date=${params.date}&seats=${params.party_size || 2}`,
         distance: "",
         distanceMeters: null,
         timeSlots,
