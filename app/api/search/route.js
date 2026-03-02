@@ -86,7 +86,7 @@ User: "${userMessage}"`;
         headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+          generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
         }),
       }),
       5000
@@ -122,6 +122,23 @@ function buildFallback(msg, location, today, currentHour) {
 
   if (msg.includes("tomorrow")) { const d = new Date(baseDate); d.setDate(d.getDate() + 1); date = fmtDate(d); }
   else {
+    // Check for numeric dates: 3/14, 03/14, 3-14
+    const numDate = msg.match(/(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/);
+    // Check for month name dates: March 14, mar 14
+    const monthNames = {jan:1,january:1,feb:2,february:2,mar:3,march:3,apr:4,april:4,may:5,jun:6,june:6,jul:7,july:7,aug:8,august:8,sep:9,september:9,oct:10,october:10,nov:11,november:11,dec:12,december:12};
+    const monthDate = msg.match(/(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?/i);
+
+    if (numDate) {
+      const m = parseInt(numDate[1]);
+      const d = parseInt(numDate[2]);
+      const y = numDate[3] ? (numDate[3].length === 2 ? 2000 + parseInt(numDate[3]) : parseInt(numDate[3])) : todayParts[0];
+      date = fmtDate(new Date(y, m - 1, d));
+    } else if (monthDate) {
+      const m = monthNames[monthDate[1].toLowerCase()];
+      const d = parseInt(monthDate[2]);
+      const y = monthDate[3] ? parseInt(monthDate[3]) : todayParts[0];
+      date = fmtDate(new Date(y, m - 1, d));
+    } else {
     const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
     for (const [name, target] of Object.entries(dayMap)) {
       if (msg.includes(name)) {
@@ -133,6 +150,7 @@ function buildFallback(msg, location, today, currentHour) {
         break;
       }
     }
+  }
   }
 
   let time = currentHour >= 21 ? "21:00" : currentHour >= 17 ? `${currentHour + 1}:00` : "19:00";
@@ -203,7 +221,6 @@ async function searchResyDirect(params) {
 
     const data = await res.json();
     const hits = data?.results?.venues || [];
-    console.log("[Resy] Raw venue:", JSON.stringify(hits[0]).slice(0, 1000));
     const cuisine = params.query || params.cuisine || "";
     const results = [];
 
@@ -212,15 +229,15 @@ async function searchResyDirect(params) {
       const slots = hit.slots || [];
       if (slots.length === 0) continue;
 
+      let cuisineMatch = true;
       if (cuisine) {
         const cuisineLower = cuisine.toLowerCase();
         const venueCuisine = (venue?.cuisine || []).map((c) => (c.name || c).toLowerCase());
         const venueType = (venue?.type || "").toLowerCase();
-        const matchesCuisine =
+        cuisineMatch =
           venueCuisine.some((c) => c.includes(cuisineLower)) ||
           venueType.includes(cuisineLower) ||
           cuisineLower.includes(venueType);
-        if (!matchesCuisine && cuisineLower !== "all") continue;
       }
 
       const citySlug = venue?.location?.url_slug;
@@ -248,8 +265,12 @@ async function searchResyDirect(params) {
         distanceMeters: null,
         timeSlots,
         confidence: "confirmed",
+        cuisineMatch,
       });
     }
+
+    // Sort cuisine matches first
+    results.sort((a, b) => (b.cuisineMatch ? 1 : 0) - (a.cuisineMatch ? 1 : 0));
 
     const latency = Date.now() - startTime;
     console.log(`[Resy] Direct: ${results.length} restaurants in ${latency}ms`);
